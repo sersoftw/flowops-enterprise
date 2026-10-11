@@ -18,7 +18,7 @@ CREATE ROLE payments_app LOGIN PASSWORD :'payments_password';
 
 REVOKE ALL ON DATABASE flowops FROM PUBLIC;
 GRANT CONNECT ON DATABASE flowops TO orders_app, inventory_app, payments_app;
-REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+REVOKE ALL ON SCHEMA public FROM PUBLIC;
 
 CREATE SCHEMA orders AUTHORIZATION orders_app;
 CREATE SCHEMA inventory AUTHORIZATION inventory_app;

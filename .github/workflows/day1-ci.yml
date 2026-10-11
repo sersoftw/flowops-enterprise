@@ -17,22 +17,38 @@ jobs:
           distribution: temurin
           java-version: '21'
           cache: maven
-      - name: Maven tests
-        run: mvn -B -ntp test
+      - name: Tool versions
+        run: |
+          java -version
+          ./mvnw -version
+          docker version
+          docker compose version
+      - name: Maven build and smoke tests
+        run: ./mvnw -B -ntp clean verify
       - name: Compose config
         run: |
           cp .env.example .env
-          docker compose -f infrastructure/docker/compose.yml --env-file .env config --quiet
+          docker compose config --quiet
       - name: Build and start service containers
-        run: docker compose -f infrastructure/docker/compose.yml --env-file .env up --build -d
+        run: docker compose up --build -d --wait --wait-timeout 240
       - name: Smoke test health endpoints
         run: bash scripts/health-check.sh
+      - name: Verify database isolation
+        run: bash scripts/verify-db-isolation.sh
+      - name: Verify Kafka listeners and persistence
+        run: bash scripts/verify-kafka.sh
       - name: Diagnostics on failure
         if: failure()
-        run: docker compose -f infrastructure/docker/compose.yml --env-file .env logs --tail=150 || true
+        run: docker compose logs --tail=150 || true
+      - name: Save test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: day1-test-reports
+          path: backend/*/target/surefire-reports/
       - name: Clean up
         if: always()
         run: |
           if [ -f .env ]; then
-            docker compose -f infrastructure/docker/compose.yml --env-file .env down -v || true
+            docker compose down -v || true
           fi
