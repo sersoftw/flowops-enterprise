@@ -1,0 +1,30 @@
+spring:
+  application:
+    name: payment-service
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:flowops}?currentSchema=${DB_SCHEMA:payments}
+    username: ${DB_USERNAME:payments_app}
+    password: ${DB_PASSWORD:}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        default_schema: ${DB_SCHEMA:payments}
+  flyway:
+    enabled: true
+    default-schema: ${DB_SCHEMA:payments}
+    schemas: ${DB_SCHEMA:payments}
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+server:
+  port: ${SERVER_PORT:8083}
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: never

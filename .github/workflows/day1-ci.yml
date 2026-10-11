@@ -1,0 +1,38 @@
+name: Day 1 - Backend & Infrastructure
+on:
+  push:
+    branches: [main, 'feat/**']
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Maven tests
+        run: mvn -B -ntp test
+      - name: Compose config
+        run: |
+          cp .env.example .env
+          docker compose -f infrastructure/docker/compose.yml --env-file .env config --quiet
+      - name: Build and start service containers
+        run: docker compose -f infrastructure/docker/compose.yml --env-file .env up --build -d
+      - name: Smoke test health endpoints
+        run: bash scripts/health-check.sh
+      - name: Diagnostics on failure
+        if: failure()
+        run: docker compose -f infrastructure/docker/compose.yml --env-file .env logs --tail=150 || true
+      - name: Clean up
+        if: always()
+        run: |
+          if [ -f .env ]; then
+            docker compose -f infrastructure/docker/compose.yml --env-file .env down -v || true
+          fi

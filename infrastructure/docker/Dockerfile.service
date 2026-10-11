@@ -1,0 +1,15 @@
+FROM maven:3.9.11-eclipse-temurin-21 AS build
+WORKDIR /workspace
+ARG SERVICE
+COPY pom.xml .
+COPY backend ./backend
+RUN mvn -B -ntp -pl backend/${SERVICE} -am -DskipTests package \
+    && cp backend/${SERVICE}/target/${SERVICE}-0.1.0-SNAPSHOT.jar /tmp/app.jar
+
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+RUN addgroup --system spring && adduser --system --ingroup spring spring
+USER spring
+COPY --from=build /tmp/app.jar app.jar
+EXPOSE 8080
+ENTRYPOINT ["java","-jar","/app/app.jar"]

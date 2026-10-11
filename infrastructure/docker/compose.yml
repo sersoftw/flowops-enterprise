@@ -1,0 +1,124 @@
+name: flowops
+
+x-app-env: &app-env
+  DB_HOST: postgres
+  DB_PORT: "5432"
+  DB_NAME: flowops
+  KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+  SERVER_PORT: "8080"
+
+x-app-base: &app-base
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+    kafka:
+      condition: service_healthy
+  networks: [flowops-net]
+
+services:
+  postgres:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_DB: flowops
+      POSTGRES_USER: flowops_admin
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?Set in .env}
+      ORDER_DB_PASSWORD: ${ORDER_DB_PASSWORD:?Set in .env}
+      INVENTORY_DB_PASSWORD: ${INVENTORY_DB_PASSWORD:?Set in .env}
+      PAYMENT_DB_PASSWORD: ${PAYMENT_DB_PASSWORD:?Set in .env}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../postgres/01-create-schemas.sh:/docker-entrypoint-initdb.d/01-create-schemas.sh:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          pg_isready -U flowops_admin -d flowops &&
+          psql -U flowops_admin -d flowops -Atqc "SELECT count(*) FROM pg_namespace WHERE nspname IN ('orders','inventory','payments')" | grep -qx 3
+      interval: 10s
+      timeout: 5s
+      retries: 15
+    networks: [flowops-net]
+
+  kafka:
+    image: apache/kafka:4.2.2
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://:29092,EXTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_NUM_PARTITIONS: "3"
+    ports:
+      - "127.0.0.1:9092:9092"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      start_period: 45s
+      interval: 15s
+      timeout: 10s
+      retries: 12
+    networks: [flowops-net]
+
+  order-service:
+    <<: *app-base
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.service
+      args:
+        SERVICE: order-service
+    environment:
+      <<: *app-env
+      DB_SCHEMA: orders
+      DB_USERNAME: orders_app
+      DB_PASSWORD: ${ORDER_DB_PASSWORD:?Set in .env}
+    ports:
+      - "127.0.0.1:8081:8080"
+
+  inventory-service:
+    <<: *app-base
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.service
+      args:
+        SERVICE: inventory-service
+    environment:
+      <<: *app-env
+      DB_SCHEMA: inventory
+      DB_USERNAME: inventory_app
+      DB_PASSWORD: ${INVENTORY_DB_PASSWORD:?Set in .env}
+    ports:
+      - "127.0.0.1:8082:8080"
+
+  payment-service:
+    <<: *app-base
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.service
+      args:
+        SERVICE: payment-service
+    environment:
+      <<: *app-env
+      DB_SCHEMA: payments
+      DB_USERNAME: payments_app
+      DB_PASSWORD: ${PAYMENT_DB_PASSWORD:?Set in .env}
+    ports:
+      - "127.0.0.1:8083:8080"
+
+volumes:
+  postgres_data:
+  kafka_data:
+
+networks:
+  flowops-net:
+    driver: bridge
