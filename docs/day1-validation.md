@@ -33,5 +33,30 @@ Build warnings: intentionally empty shared-contracts JAR, Mockito dynamic agent 
 
 The CI workflow now runs Wrapper clean verify, root Compose config/build/up, HTTP health, authenticated PostgreSQL isolation, both Kafka listeners and persistence after broker container recreation. Test reports are uploaded and container logs are printed on failure.
 
-Container results and PR/CI links will be recorded after publication. Until that evidence exists, Docker acceptance is **pending**, not passed.
-Human review and merge are also pending. Do not close Issue #1 or start Issue #2 until Day 1 is reviewed, integrated and validated.
+PR: [#15 — Complete Day 1 bootstrap](https://github.com/sersoftw/flowops-enterprise/pull/15).
+Implementation tested: `b16d66504cc6922bbaeb226e71dd457a016658de`.
+Both the [branch CI run](https://github.com/sersoftw/flowops-enterprise/actions/runs/38174734040)
+and [PR CI run](https://github.com/sersoftw/flowops-enterprise/actions/runs/38174768400)
+completed with **success** on 2026-10-11. The logs were read after completion.
+
+Runner versions: Eclipse Adoptium Java **21.0.12.1**, Maven **3.9.11**,
+Docker client/server **28.0.4**, Docker Compose **2.38.2** (Linux amd64).
+
+| Actual CI command | Result |
+| --- | --- |
+| `./mvnw -B -ntp clean verify` | PASS: five modules, six tests, zero failures/errors/skips, executable JARs packaged |
+| `cp .env.example .env` then `docker compose config --quiet` | PASS |
+| `docker compose up --build -d --wait --wait-timeout 240` | PASS: PostgreSQL, Kafka and all three services built/started |
+| `bash scripts/health-check.sh` | PASS: HTTP 200 and top-level `status=UP` on ports 8081, 8082 and 8083; `3/3 healthy` |
+| `bash scripts/verify-db-isolation.sh` | PASS: all three roles own/read/write their schemas, V1 migrations applied, six foreign-schema pairs deny reads/creation, public schema and database creation denied |
+| `bash scripts/verify-kafka.sh` | PASS: internal and external listeners answer, test message survives forced broker container recreation with the same volume |
+| `docker compose down -v` | PASS: isolated CI stack removed |
+
+The initial scaffold's separate service applications, configuration and V1 migrations were retained.
+Changed files cover the official Wrapper and line endings, root Compose entry point, Kafka log path,
+public-schema permissions, three service test dependencies/suites, smoke scripts, CI, README and ADR-0004.
+Only example local credentials are committed; `.env` and runtime logs remain ignored.
+
+Container acceptance is validated **in GitHub Actions**, not on this Windows host.
+There are no observed failing checks. The build warnings documented above remain non-blocking.
+Human review and merge are pending. Do not close Issue #1 or start Issue #2 until Day 1 is reviewed, integrated and validated after merge.
