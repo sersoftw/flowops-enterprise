@@ -1,0 +1,4 @@
+# Keep the infrastructure definition in one place; resolve its paths relative to itself.
+name: flowops
+include:
+  - infrastructure/docker/compose.yml
