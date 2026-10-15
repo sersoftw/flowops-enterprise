@@ -34,4 +34,22 @@ class OpenApiContractTest {
             assertTrue(errors.stream().anyMatch(e -> e.getType().equals("pattern")), errors.toString());
         }
     }
+
+    @Test void quantityUsesMathematicalIntegerSemantics() throws Exception {
+        for (String quantity : new String[]{"1", "1.0", "1.000", "1e0", "10000.0"}) {
+            assertTrue(OpenApiSchemas.validate("CreateOrder", REQUEST.replace("\"quantity\":2", "\"quantity\":" + quantity)).isEmpty(), quantity);
+        }
+        for (String quantity : new String[]{"1.5", "0.0", "10001.0", "2147483648", "\"1\""}) {
+            assertFalse(OpenApiSchemas.validate("CreateOrder", REQUEST.replace("\"quantity\":2", "\"quantity\":" + quantity)).isEmpty(), quantity);
+        }
+    }
+
+    @Test void pricesAllowOnlyExactCentValuesRegardlessOfTrailingZeros() throws Exception {
+        for (String price : new String[]{"12.500", "12.5000", "1.2500e1", "0.01000", "999999999.9900"}) {
+            assertTrue(OpenApiSchemas.validate("CreateOrder", REQUEST.replace("12.50", price)).isEmpty(), price);
+        }
+        for (String price : new String[]{"12.501", "0.00100", "0.000", "-1.000", "1000000000.000"}) {
+            assertFalse(OpenApiSchemas.validate("CreateOrder", REQUEST.replace("12.50", price)).isEmpty(), price);
+        }
+    }
 }

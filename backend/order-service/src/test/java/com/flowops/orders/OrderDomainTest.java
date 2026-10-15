@@ -46,4 +46,24 @@ class OrderDomainTest {
     private Order order(List<Order.Item> items) {
         return new Order(UUID.randomUUID(), UUID.randomUUID(), "EUR", Order.Status.PENDING, Instant.now(), items);
     }
+
+    @Test void normalizesEquivalentPricesWithoutRounding() {
+        for (String price : List.of("12.50", "12.500", "12.5000", "1.2500e1")) {
+            var item = new Order.Item("sku", 1, new BigDecimal(price));
+            assertEquals(new BigDecimal("12.50"), item.unitPrice());
+            assertEquals(new BigDecimal("12.50"), item.subtotal());
+        }
+        assertEquals(new BigDecimal("0.01"), new Order.Item("sku", 10000, new BigDecimal("0.01000")).unitPrice());
+        for (String price : List.of("12.501", "12.5000000000000001", "0.00100", "1000000000.000")) {
+            assertThrows(IllegalArgumentException.class, () -> new Order.Item("sku", 1, new BigDecimal(price)));
+        }
+    }
+
+    @Test void preservesIntegerQuantityBounds() {
+        assertEquals(1, new Order.Item("sku", 1, BigDecimal.ONE).quantity());
+        assertEquals(10000, new Order.Item("sku", 10000, BigDecimal.ONE).quantity());
+        for (int quantity : new int[]{Integer.MIN_VALUE, 0, 10001, Integer.MAX_VALUE}) {
+            assertThrows(IllegalArgumentException.class, () -> new Order.Item("sku", quantity, BigDecimal.ONE));
+        }
+    }
 }

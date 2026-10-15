@@ -8,7 +8,8 @@ import java.util.Set;
 import org.yaml.snakeyaml.Yaml;
 
 final class OpenApiSchemas {
-    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final ObjectMapper JSON = new ObjectMapper()
+            .enable(com.fasterxml.jackson.databind.DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
 
     static Set<ValidationMessage> validate(String schemaName, String body) throws Exception {
         try (var input = OpenApiSchemas.class.getResourceAsStream("/static/openapi.yaml")) {
