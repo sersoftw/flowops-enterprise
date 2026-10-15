@@ -35,4 +35,3 @@ public class KafkaTransport {
         handler.accept(record.key(), record.value());
     }
 }
-

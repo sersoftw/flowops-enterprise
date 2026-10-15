@@ -4,4 +4,3 @@ CREATE TABLE inventory_decision (
     request_json TEXT NOT NULL,
     result_type VARCHAR(40) NOT NULL CHECK (result_type IN ('InventoryReserved', 'InventoryRejected'))
 );
-
