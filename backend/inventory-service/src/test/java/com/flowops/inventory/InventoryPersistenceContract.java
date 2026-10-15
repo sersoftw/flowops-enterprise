@@ -176,7 +176,7 @@ abstract class InventoryPersistenceContract {
     }
 
     // Independent worker threads enter through the real application bean and use separate DB transactions.
-    private List<Object> race(Supplier<?> first, Supplier<?> second) throws Exception {
+    protected List<Object> race(Supplier<?> first, Supplier<?> second) throws Exception {
         var ready = new CountDownLatch(2);
         var start = new CountDownLatch(1);
         var pool = Executors.newFixedThreadPool(2);

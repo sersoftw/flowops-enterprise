@@ -27,6 +27,7 @@ public class OrderController {
         return ResponseEntity.status(result.replayed() ? 200 : 201)
                 .location(URI.create("/api/orders/" + result.order().id()))
                 .header("Idempotency-Replayed", Boolean.toString(result.replayed()))
+                .header("X-Correlation-Id", result.order().id().toString())
                 .body(OrderResponse.from(result.order()));
     }
 

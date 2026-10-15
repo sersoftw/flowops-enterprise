@@ -33,6 +33,11 @@ settings continue to derive from DB_SCHEMA in application.yml.
 
 ## Transactions and concurrency
 
+Day 4 extends this baseline in [ADR-0007](0007-kafka-outbox-and-inbox.md): all stock
+rows are locked and validated before mutation, and a transaction-internal operation
+lets the message processor commit reservation, inbox, decision and outbox together.
+The standalone internal API retains its independent transaction boundary.
+
 Each mutation runs in its own READ COMMITTED transaction with a 15-second statement
 timeout. The boundary deliberately commits independently of any future caller's
 transaction (REQUIRES_NEW); callers must not assume cross-service atomicity.

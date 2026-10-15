@@ -9,5 +9,10 @@
     </parent>
     <artifactId>shared-contracts</artifactId>
     <packaging>jar</packaging>
-    <description>Reserved for versioned event contracts; intentionally empty on Day 1.</description>
+    <description>Versioned transport DTOs and JSON event schemas only.</description>
+    <dependencies>
+        <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-test</artifactId><scope>test</scope></dependency>
+        <dependency><groupId>tools.jackson.core</groupId><artifactId>jackson-databind</artifactId><scope>test</scope></dependency>
+        <dependency><groupId>com.networknt</groupId><artifactId>json-schema-validator</artifactId><version>${json-schema-validator.version}</version><scope>test</scope></dependency>
+    </dependencies>
 </project>
