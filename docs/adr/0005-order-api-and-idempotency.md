@@ -12,6 +12,13 @@ Flyway V2 adds orders/items, constraints and indexes; Hibernate remains in valid
 Orders begin in PENDING. No transitions or messaging are implemented in this issue.
 Each order has a customer UUID, an uppercase ISO currency and 1–100 ordered line items.
 Quantity is 1–10000, unit price is 0.01–999999999.99 with at most two decimal places.
+Quantity follows JSON Schema mathematical integer semantics: numeric tokens such as
+1, 1.0 and 1e0 are equivalent. A field-specific Jackson deserializer uses BigDecimal
+and intValueExact; fractional values, overflow and quoted quantities are rejected.
+The global float-to-int coercion remains disabled for other integer inputs.
+The request DTO strips insignificant price zeros before Bean Validation: 12.500 is
+accepted as 12.50, but 12.501 is rejected without rounding. Domain validation and
+two-decimal persistence remain unchanged; equivalent numeric forms share replay identity.
 BigDecimal computes totals on the server; clients cannot submit a total. Prices are supplied
 by the caller for this portfolio API: there is no trusted catalog or payment authorization yet.
 All supported currencies use two decimal places in this intentionally limited API.

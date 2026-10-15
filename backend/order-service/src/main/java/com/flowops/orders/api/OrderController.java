@@ -48,9 +48,15 @@ public class OrderController {
                               @NotEmpty @Size(max = 100) List<@NotNull @Valid ItemRequest> items) { }
     public record ItemRequest(@NotBlank @Size(max = 100)
                               @Pattern(regexp = "[^\\x00]*", message = "must not contain NUL characters") String productId,
+                              @tools.jackson.databind.annotation.JsonDeserialize(using = ExactIntegerDeserializer.class)
                               @NotNull @Min(1) @Max(10000) Integer quantity,
                               @NotNull @DecimalMin("0.01") @DecimalMax("999999999.99")
-                              @Digits(integer = 9, fraction = 2) BigDecimal unitPrice) { }
+                              @Digits(integer = 9, fraction = 2) BigDecimal unitPrice) {
+        public ItemRequest {
+            // Validate monetary precision by value, not by insignificant trailing zeros.
+            if (unitPrice != null) unitPrice = unitPrice.stripTrailingZeros();
+        }
+    }
     public record OrderResponse(UUID id, UUID customerId, String currency, Order.Status status,
                                 Instant createdAt, List<Order.Item> items, BigDecimal total) {
         static OrderResponse from(Order order) {

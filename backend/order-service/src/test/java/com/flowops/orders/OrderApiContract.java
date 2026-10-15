@@ -176,4 +176,57 @@ abstract class OrderApiContract {
         assertEquals("urn:flowops:problem:http-" + status, body(response).get("type").asText());
         assertTrue(response.headers().firstValue("Content-Type").orElse("").contains("application/problem+json"));
     }
+
+    @Test void integralNumericQuantitiesPersistAndReplayAsIntegers() throws Exception {
+        for (String quantity : List.of("1.0", "1.000", "1e0", "10000.0")) {
+            var key = UUID.randomUUID().toString();
+            int normalized = new java.math.BigDecimal(quantity).intValueExact();
+            var canonical = payload(UUID.randomUUID()).replace("\"quantity\":2", "\"quantity\":" + normalized);
+            var request = canonical.replace("\"quantity\":" + normalized, "\"quantity\":" + quantity);
+            assertTrue(OpenApiSchemas.validate("CreateOrder", request).isEmpty());
+            var response = post(key, request);
+            assertEquals(201, response.statusCode(), response.body());
+            var id = body(response).get("id").asText();
+            assertEquals(normalized, body(response).get("items").get(0).get("quantity").asInt());
+            assertEquals(normalized, body(get("/api/orders/" + id)).get("items").get(0).get("quantity").asInt());
+            var replay = post(key, canonical);
+            assertEquals(200, replay.statusCode(), replay.body());
+            assertEquals(id, body(replay).get("id").asText());
+        }
+    }
+
+    @Test void trailingZeroPricesPersistAndReplayAsExactCents() throws Exception {
+        for (String price : List.of("12.500", "12.5000", "1.2500e1", "0.01000", "999999999.9900")) {
+            var key = UUID.randomUUID().toString();
+            var normalized = new java.math.BigDecimal(price).setScale(2);
+            var canonical = payload(UUID.randomUUID()).replace("12.50", normalized.toPlainString());
+            var request = canonical.replace(normalized.toPlainString(), price);
+            assertTrue(OpenApiSchemas.validate("CreateOrder", request).isEmpty());
+            var response = post(key, request);
+            assertEquals(201, response.statusCode(), response.body());
+            var id = UUID.fromString(body(response).get("id").asText());
+            assertEquals(normalized, jdbc.queryForObject("select unit_price from orders.order_item where order_id = ?", java.math.BigDecimal.class, id));
+            assertEquals(normalized.multiply(java.math.BigDecimal.valueOf(2)), jdbc.queryForObject("select total from orders.purchase_order where id = ?", java.math.BigDecimal.class, id));
+            var replay = post(key, canonical);
+            assertEquals(200, replay.statusCode(), replay.body());
+            assertEquals(body(response).get("id"), body(replay).get("id"));
+        }
+    }
+
+    @Test void rejectsFractionalOrOutOfRangeNumbersWithoutReservingKey() throws Exception {
+        var valid = payload(UUID.randomUUID());
+        var invalid = new java.util.ArrayList<String>();
+        for (String quantity : List.of("1.5", "1.0000000000000001", "0.0", "10001.0", "2147483648", "\"1\"", "true", "null")) {
+            invalid.add(valid.replace("\"quantity\":2", "\"quantity\":" + quantity));
+        }
+        for (String price : List.of("12.501", "12.5000000000000001", "0.00100", "1000000000.000")) {
+            invalid.add(valid.replace("12.50", price));
+        }
+        for (var request : invalid) {
+            var key = UUID.randomUUID().toString();
+            assertProblem(post(key, request), 400);
+            assertEquals(0, jdbc.queryForObject("select count(*) from orders.purchase_order where idempotency_key = ?", Integer.class, key));
+            assertEquals(201, post(key, valid).statusCode());
+        }
+    }
 }
