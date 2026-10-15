@@ -1,6 +1,6 @@
 # FlowOps Enterprise
 
-**Day 2 — Order domain, persistence and REST API (pending review).**
+**Day 3 — Inventory catalog and concurrent reservations (pending review).**
 
 Java 21, Spring Boot 4.1.1, Maven multi-module, PostgreSQL 17, Apache Kafka 4.2.2, Docker Compose.
 
@@ -67,7 +67,7 @@ Maven smoke tests start each application on a random HTTP port with H2 in Postgr
 ```text
 pom.xml                         aggregator/parent
 backend/order-service           REST entry point (later: saga coordinator)
-backend/inventory-service       Inventory events and reservations (later)
+backend/inventory-service       Internal catalog, stock and atomic reservations
 backend/payment-service         Simulated payments (later)
 backend/shared-contracts        Kafka contract types (later)
 infrastructure/docker           Compose and Dockerfiles
@@ -114,7 +114,32 @@ Prices are caller-supplied in this development API; totals are calculated server
 BigDecimal. No catalog authority or payment processing is implied. See the
 [Day 2 validation record](docs/day2-validation.md) for actual results.
 
-**Not implemented yet:** inventory reservation, payment processing, JWT, React UI, outbox, saga, DLQ.
+## Inventory service (Day 3)
+
+The internal Java `InventoryService` supports product creation/lookup, stock lookup,
+replenishment, `reserve(orderId, items)` and `release(orderId)`. There are no inventory
+business HTTP endpoints yet. The health endpoint remains on port 8082.
+
+Reservations atomically move available units to reserved units. A repeated order ID
+with the same products/quantities returns its existing reservation; changed content
+raises a conflict. Release returns stock once. Replaying a released reservation
+returns RELEASED without reserving again. Missing release is a no-op, not a persistent
+cancellation. Products are locked in a stable order; insufficient stock rolls back
+all lines. See [ADR-0006](docs/adr/0006-inventory-reservations.md) for limits and concurrency.
+
+```java
+inventory.createProduct("sku-1", "Example product", 10);
+inventory.replenish("sku-1", 5);
+inventory.reserve(orderId, List.of(new ReservationLine("sku-1", 3)));
+inventory.stock("sku-1"); // available=12, reserved=3
+inventory.release(orderId); // available=15, reserved=0
+```
+
+Run `./mvnw -B -ntp -Dpostgres.tests=true clean verify` with Docker for the complete
+suite, including PostgreSQL concurrency tests. Without that property, PostgreSQL
+tests are explicitly skipped. See [Day 3 validation](docs/day3-validation.md).
+
+**Not implemented yet:** inventory business HTTP API, payment processing, JWT, React UI, outbox, saga, DLQ.
 
 ## Known assumptions and security boundaries
 
