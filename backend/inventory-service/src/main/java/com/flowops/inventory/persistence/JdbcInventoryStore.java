@@ -78,19 +78,7 @@ public class JdbcInventoryStore implements InventoryStore {
     public Reservation reserve(Reservation request) {
         if (request.status() != Reservation.Status.RESERVED) throw new IllegalArgumentException("Expected RESERVED");
         try {
-            return transaction.execute(tx -> {
-                var existing = readReservation(request.orderId(), false);
-                if (existing.isPresent()) return replay(existing.get(), request);
-                // The unique order key serializes contenders before any stock is changed.
-                jdbc.update("INSERT INTO " + schema + ".reservation (order_id, status) VALUES (?, 'RESERVED')", request.orderId());
-                // Domain canonicalization orders all stock locks consistently across reservations/releases.
-                for (var line : request.lines()) {
-                    saveStock(lockStock(line.productId()).reserve(line.quantity()));
-                    jdbc.update("INSERT INTO " + schema + ".reservation_line (order_id, product_id, quantity) VALUES (?, ?, ?)",
-                            request.orderId(), line.productId(), line.quantity());
-                }
-                return request;
-            });
+            return transaction.execute(tx -> reserveInTransaction(request));
         } catch (DuplicateKeyException ex) {
             // PostgreSQL aborts the losing transaction. Replay only after rollback, in a fresh transaction.
             return transaction.execute(tx -> readReservation(request.orderId(), false)
@@ -98,6 +86,28 @@ public class JdbcInventoryStore implements InventoryStore {
         }
     }
 
+    // The message handler shares its inbox/decision/outbox transaction with this operation.
+    // Lock and validate every line before mutating, so expected rejection leaves no partial state.
+    Reservation reserveInTransaction(Reservation request) {
+        if (!org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()) {
+            throw new IllegalStateException("Reservation requires an active transaction");
+        }
+        var existing = readReservation(request.orderId(), false);
+        if (existing.isPresent()) return replay(existing.get(), request);
+        var locked = request.lines().stream().map(line -> lockStock(line.productId())).toList();
+        existing = readReservation(request.orderId(), false);
+        if (existing.isPresent()) return replay(existing.get(), request);
+        var updated = new java.util.ArrayList<Stock>();
+        for (int i = 0; i < locked.size(); i++) updated.add(locked.get(i).reserve(request.lines().get(i).quantity()));
+        jdbc.update("INSERT INTO " + schema + ".reservation (order_id, status) VALUES (?, 'RESERVED')", request.orderId());
+        for (int i = 0; i < updated.size(); i++) {
+            saveStock(updated.get(i));
+            var line = request.lines().get(i);
+            jdbc.update("INSERT INTO " + schema + ".reservation_line (order_id, product_id, quantity) VALUES (?, ?, ?)",
+                    request.orderId(), line.productId(), line.quantity());
+        }
+        return request;
+    }
     private Reservation replay(Reservation existing, Reservation request) {
         if (!existing.lines().equals(request.lines())) throw new Conflict();
         return existing;

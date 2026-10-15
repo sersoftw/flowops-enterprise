@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: FlowOps Order API
-  version: 0.2.0
-  description: Day 2 API. Development only; no authentication or payment authorization.
+  version: 0.4.0
+  description: Orders with asynchronous inventory outcomes. Development only; no authentication or payment authorization.
 servers:
   - url: http://localhost:8081
 paths:
@@ -27,14 +27,16 @@ paths:
           headers:
             Location: {schema: {type: string}, description: Relative URL of the order}
             Idempotency-Replayed: {schema: {type: string, enum: ['false']}}
+            X-Correlation-Id: {schema: {type: string, format: uuid}, description: Generated order UUID propagated through Kafka}
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Order'}
         '200':
-          description: Replay of the original order
+          description: Replay of the original order with its current workflow status
           headers:
             Location: {schema: {type: string}, description: Relative URL of the order}
             Idempotency-Replayed: {schema: {type: string, enum: ['true']}}
+            X-Correlation-Id: {schema: {type: string, format: uuid}, description: Original correlation UUID}
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Order'}
@@ -49,7 +51,7 @@ paths:
       summary: List orders ordered by createdAt descending, then ID descending
       parameters:
         - {in: query, name: customerId, schema: {type: string, format: uuid}}
-        - {in: query, name: status, schema: {type: string, enum: [PENDING]}}
+        - {in: query, name: status, schema: {type: string, enum: [PENDING, INVENTORY_RESERVED, INVENTORY_REJECTED]}}
         - {in: query, name: page, schema: {type: integer, minimum: 0, maximum: 1000000, default: 0}}
         - {in: query, name: size, schema: {type: integer, minimum: 1, maximum: 100, default: 20}}
       responses:
@@ -118,7 +120,7 @@ components:
         customerId: {$ref: '#/components/schemas/CreateOrder/properties/customerId'}
         currency: {$ref: '#/components/schemas/CreateOrder/properties/currency'}
         items: {$ref: '#/components/schemas/CreateOrder/properties/items'}
-        status: {type: string, enum: [PENDING]}
+        status: {type: string, enum: [PENDING, INVENTORY_RESERVED, INVENTORY_REJECTED]}
         createdAt: {type: string, format: date-time}
         total: {type: number, description: Sum of quantity times unitPrice computed by the server}
     Problem:

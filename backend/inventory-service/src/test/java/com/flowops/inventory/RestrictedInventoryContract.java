@@ -6,7 +6,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.dao.DataAccessException;
 import static org.junit.jupiter.api.Assertions.*;
 
-abstract class RestrictedInventoryContract extends InventoryPersistenceContract {
+abstract class RestrictedInventoryContract extends InventoryMessagingContract {
     @Test void migrationsAndQueriesUseOnlyTheConfiguredOwnedSchema() {
         assertEquals(schemaName, jdbc.queryForObject("SELECT current_schema()", String.class));
         assertEquals(schemaName + "_app", jdbc.queryForObject("SELECT current_user", String.class));

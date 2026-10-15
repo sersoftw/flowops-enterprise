@@ -8,4 +8,4 @@ import org.springframework.boot.test.context.SpringBootTest;
     "spring.datasource.url=jdbc:h2:mem:inventory-alt;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1",
     "spring.datasource.username=sa", "spring.datasource.password="
 })
-class AlternateSchemaTest extends InventoryPersistenceContract {}
+class AlternateSchemaTest extends InventoryMessagingContract {}

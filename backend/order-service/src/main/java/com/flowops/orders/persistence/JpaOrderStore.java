@@ -17,9 +17,11 @@ import org.springframework.transaction.support.TransactionTemplate;
 public class JpaOrderStore implements OrderStore {
     private final OrderRepository repository;
     private final TransactionTemplate transaction;
+    private final OrderMessaging messaging;
 
-    public JpaOrderStore(OrderRepository repository, PlatformTransactionManager manager) {
+    public JpaOrderStore(OrderRepository repository, PlatformTransactionManager manager, OrderMessaging messaging) {
         this.repository = repository;
+        this.messaging = messaging;
         transaction = new TransactionTemplate(manager);
         transaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
@@ -29,7 +31,11 @@ public class JpaOrderStore implements OrderStore {
         try {
             return transaction.execute(tx -> repository.findByIdempotencyKey(key)
                     .map(existing -> replay(existing.domain(), order))
-                    .orElseGet(() -> new Creation(repository.saveAndFlush(new OrderEntity(key, order)).domain(), false)));
+                    .orElseGet(() -> {
+                        var saved = repository.saveAndFlush(new OrderEntity(key, order)).domain();
+                        messaging.created(saved);
+                        return new Creation(saved, false);
+                    }));
         } catch (DataIntegrityViolationException ex) {
             // A competing insert can win the unique key. Read only after the losing transaction rolls back.
             return transaction.execute(tx -> repository.findByIdempotencyKey(key)
