@@ -1,4 +1,4 @@
-name: Day 1 - Backend & Infrastructure
+name: Backend & Infrastructure
 on:
   push:
     branches: [main, 'feat/**']
@@ -24,7 +24,7 @@ jobs:
           docker version
           docker compose version
       - name: Maven build and smoke tests
-        run: ./mvnw -B -ntp clean verify
+        run: ./mvnw -B -ntp -Dpostgres.tests=true clean verify
       - name: Compose config
         run: |
           cp .env.example .env
@@ -35,6 +35,8 @@ jobs:
         run: bash scripts/health-check.sh
       - name: Verify database isolation
         run: bash scripts/verify-db-isolation.sh
+      - name: Verify order API and persistence after restart
+        run: bash scripts/verify-orders.sh
       - name: Verify Kafka listeners and persistence
         run: bash scripts/verify-kafka.sh
       - name: Diagnostics on failure
@@ -44,7 +46,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: day1-test-reports
+          name: backend-test-reports
           path: backend/*/target/surefire-reports/
       - name: Clean up
         if: always()
