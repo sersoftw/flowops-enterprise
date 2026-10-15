@@ -35,10 +35,14 @@ $env:MAVEN_OPTS='-Djavax.net.ssl.trustStoreType=Windows-ROOT -Djavax.net.ssl.tru
 - Full clean verify: BUILD SUCCESS, all five modules. 16 executed tests passed;
   seven PostgreSQL tests explicitly skipped without the opt-in property.
 - Order-module verify after strict JSON validation: BUILD SUCCESS, 12 executed tests
-  passed and seven PostgreSQL tests skipped.
+  passed and seven PostgreSQL tests skipped. Repeated successfully on the final
+  implementation, including explicit problem type assertions (16.928 seconds).
 - An earlier test caught invalid UUIDs incorrectly returning 500; corrected to 400.
   Fractional quantities and unknown body fields now return 400.
 - `git diff --check`: passed. Git Bash `bash -n scripts/verify-orders.sh`: passed.
+- OpenAPI YAML parsed successfully and all internal references resolved using the
+  existing SnakeYAML 2.6 dependency via a temporary Java source launcher. The first
+  Python attempt could not run because that Python installation lacked PyYAML.
 - Docker CLI unavailable: `docker compose config --quiet` could not run locally.
   No local container, PostgreSQL Testcontainers or Compose HTTP result is claimed.
 - Initial sandbox Maven dependency-cache writes and Bash MSYS initialization were denied;
@@ -49,8 +53,24 @@ $env:MAVEN_OPTS='-Djavax.net.ssl.trustStoreType=Windows-ROOT -Djavax.net.ssl.tru
 
 ## Remote acceptance
 
-Pending new branch CI: `./mvnw -B -ntp -Dpostgres.tests=true clean verify`, Compose config,
-build/start, HTTP health, schema isolation, order create/list/errors/restart/replay,
-Kafka listeners and persistence. Results will be recorded after the run completes.
+PR: [#16 — Day 2 order domain, persistence and idempotent REST API](https://github.com/sersoftw/flowops-enterprise/pull/16).
+Implementation tested: `3397a68025037dd3e4051f8eb5e3e7808ea957ed`.
+[PR CI run 38662753323](https://github.com/sersoftw/flowops-enterprise/actions/runs/38662753323)
+completed with **success** on 2026-10-15. The completed job log was downloaded and read.
+
+| Actual CI command | Result |
+| --- | --- |
+| `./mvnw -B -ntp -Dpostgres.tests=true clean verify` | PASS: five modules, 23 tests, zero failures/errors/skips |
+| PostgreSQL Testcontainers HTTP suite | PASS: seven tests, including simultaneous identical and conflicting requests |
+| `docker compose config --quiet` | PASS |
+| `docker compose up --build -d --wait --wait-timeout 240` | PASS |
+| `bash scripts/health-check.sh` | PASS: 3/3 healthy |
+| `bash scripts/verify-db-isolation.sh` | PASS: restricted roles and cross-schema denials |
+| `bash scripts/verify-orders.sh` | PASS: curl creation/list/validation/conflict, service restart, persisted read and replay |
+| `bash scripts/verify-kafka.sh` | PASS: both listeners and broker persistence |
+
+The follow-up evidence commit changes documentation only; its CI is tracked on the PR.
+No known failing implementation checks remain. Local Docker remains unavailable;
+all PostgreSQL/container evidence above comes from GitHub Actions.
 
 Human review and merge remain required. Do not advance to Day 3 or close Issue #2 manually.
