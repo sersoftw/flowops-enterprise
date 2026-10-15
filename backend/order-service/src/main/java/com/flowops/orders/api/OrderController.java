@@ -46,7 +46,8 @@ public class OrderController {
     public record CreateOrder(@NotNull UUID customerId,
                               @NotNull @Pattern(regexp = "[A-Z]{3}") String currency,
                               @NotEmpty @Size(max = 100) List<@NotNull @Valid ItemRequest> items) { }
-    public record ItemRequest(@NotBlank @Size(max = 100) String productId,
+    public record ItemRequest(@NotBlank @Size(max = 100)
+                              @Pattern(regexp = "[^\\x00]*", message = "must not contain NUL characters") String productId,
                               @NotNull @Min(1) @Max(10000) Integer quantity,
                               @NotNull @DecimalMin("0.01") @DecimalMax("999999999.99")
                               @Digits(integer = 9, fraction = 2) BigDecimal unitPrice) { }

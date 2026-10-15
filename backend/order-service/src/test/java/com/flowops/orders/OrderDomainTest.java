@@ -10,6 +10,14 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 class OrderDomainTest {
+    @Test void rejectsNulInProductIdBeforePersistence() {
+        for (String product : List.of("\0sku", "sku\0one", "sku\0")) {
+            var error = assertThrows(IllegalArgumentException.class,
+                    () -> new Order.Item(product, 1, BigDecimal.ONE));
+            assertEquals("Product ID must not contain NUL characters", error.getMessage());
+        }
+    }
+
     @Test void calculatesExactTotalsAndCopiesItems() {
         var items = new ArrayList<>(List.of(new Order.Item("sku", 3, new BigDecimal("0.10"))));
         var order = order(items);

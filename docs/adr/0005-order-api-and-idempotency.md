@@ -36,6 +36,11 @@ status filters, and createdAt DESC/id DESC ordering. Each response includes tota
 and totalPages. Offset pagination is not a snapshot across concurrent insertions.
 Errors use application/problem+json; validation errors include field paths without rejected values.
 OpenAPI is maintained as a static versioned contract, avoiding an extra runtime library.
+CreateOrder and Item reject undeclared properties in both OpenAPI and JSON deserialization.
+The response schema declares its own properties instead of extending the closed request
+with allOf. Product IDs cannot contain NUL characters: Bean Validation returns a field-level
+400 and the domain independently enforces this invariant before PostgreSQL persistence.
+Rejected requests do not reserve an idempotency key, so callers can correct and retry them.
 
 ## Validation
 
@@ -44,6 +49,10 @@ against PostgreSQL 17.6 with `-Dpostgres.tests=true`; CI requires it, and Docker
 are not silently skipped. Compose additionally checks restricted application roles and
 HTTP read/replay after restarting order-service. PostgreSQL Testcontainers uses its isolated
 test role; production-like role isolation remains the separate Compose test's responsibility.
+Regression tests validate the published schemas using a test-only JSON Schema 2020-12
+validator, including unknown order/item properties and complete valid responses. The shared
+H2/PostgreSQL HTTP suite covers NUL at the beginning, middle and end of a product ID,
+absence of persisted orders after rejection, and corrected retries with the same key.
 
 ## Deferred
 

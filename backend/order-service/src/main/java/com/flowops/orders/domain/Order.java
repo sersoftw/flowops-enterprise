@@ -37,6 +37,9 @@ public record Order(UUID id, UUID customerId, String currency, Status status,
             if (productId == null || productId.isBlank() || productId.length() > 100) {
                 throw new IllegalArgumentException("Product ID must contain 1 to 100 characters");
             }
+            if (productId.indexOf('\0') >= 0) {
+                throw new IllegalArgumentException("Product ID must not contain NUL characters");
+            }
             if (quantity < 1 || quantity > 10000) {
                 throw new IllegalArgumentException("Quantity must be between 1 and 10000");
             }

@@ -43,6 +43,7 @@ abstract class OrderApiContract {
         var customer = UUID.randomUUID();
         var created = post(UUID.randomUUID().toString(), payload(customer));
         assertEquals(201, created.statusCode(), created.body());
+        assertTrue(OpenApiSchemas.validate("Order", created.body()).isEmpty(), created.body());
         assertEquals("PENDING", body(created).get("status").asText());
         assertEquals(25.0, body(created).get("total").asDouble());
         assertEquals("false", created.headers().firstValue("Idempotency-Replayed").orElseThrow());
@@ -131,6 +132,34 @@ abstract class OrderApiContract {
             assertProblem(get(path), 400);
         }
         assertProblem(get("/api/orders/" + UUID.randomUUID()), 404);
+    }
+
+    @Test void unknownPropertiesMatchPublishedContractAndDoNotReserveKey() throws Exception {
+        var customer = UUID.randomUUID();
+        var valid = payload(customer);
+        for (String invalid : List.of(valid.replace("\"currency\"", "\"total\":1,\"currency\""),
+                valid.replace("\"quantity\"", "\"discount\":1,\"quantity\""))) {
+            var key = UUID.randomUUID().toString();
+            assertFalse(OpenApiSchemas.validate("CreateOrder", invalid).isEmpty());
+            assertProblem(post(key, invalid), 400);
+            assertEquals(0, jdbc.queryForObject("select count(*) from orders.purchase_order where idempotency_key = ?", Integer.class, key));
+            assertEquals(201, post(key, valid).statusCode());
+        }
+    }
+
+    @Test void nulProductIdsReturnValidationErrorsWithoutPersistenceAndAllowCorrectedRetry() throws Exception {
+        for (String product : List.of("\\u0000sku", "sku\\u0000one", "sku\\u0000")) {
+            var customer = UUID.randomUUID();
+            var key = UUID.randomUUID().toString();
+            var valid = payload(customer);
+            var response = post(key, valid.replace("sku-1", product));
+            assertProblem(response, 400);
+            assertEquals("items[0].productId", body(response).get("errors").get(0).get("field").asText());
+            assertEquals(0, jdbc.queryForObject("select count(*) from orders.purchase_order where customer_id = ?", Integer.class, customer));
+            var corrected = post(key, valid);
+            assertEquals(201, corrected.statusCode(), corrected.body());
+            assertEquals(200, post(key, valid).statusCode());
+        }
     }
 
     @Test void databaseRejectsInvalidItemAndRollsBack() throws Exception {

@@ -74,3 +74,28 @@ No known failing implementation checks remain. Local Docker remains unavailable;
 all PostgreSQL/container evidence above comes from GitHub Actions.
 
 Human review and merge remain required. Do not advance to Day 3 or close Issue #2 manually.
+
+## PR #16 review corrections (2026-10-15)
+
+Addressed comments 4277892229 (closed request schemas) and 4277892235 (NUL product IDs).
+CreateOrder and Item now disallow additional properties. Order declares its response fields
+independently, reusing property definitions without inheriting the closed request schema.
+NUL is rejected by the REST DTO, domain and published productId pattern.
+
+Added a test-only JSON Schema validator, pinned in the parent POM, to exercise the published
+contract rather than only asserting YAML text. The tests cover unknown top-level/nested
+properties, valid requests/responses, and NUL at three positions. The HTTP tests run on both
+H2 and PostgreSQL and verify rejection leaves no order/key, followed by a successful retry.
+
+Actual local commands (same process-local Windows trust options as above):
+
+- `mvnw.cmd -B -ntp -pl backend/order-service -Dtest=OpenApiContractTest,OrderDomainTest test`
+  before the fixes: eight tests, four expected failures reproducing both review issues.
+- `mvnw.cmd -B -ntp clean verify` after the fixes: BUILD SUCCESS, five modules,
+  23 tests passed; nine PostgreSQL tests explicitly skipped locally; 33.286 seconds.
+- `git diff --check`: passed.
+
+Docker remains unavailable locally. The existing GitHub Actions workflow requires
+`-Dpostgres.tests=true` and all Compose checks; results for the correction commit are
+recorded in the [PR checks and review replies](https://github.com/sersoftw/flowops-enterprise/pull/16).
+No PostgreSQL/container success is inferred from the local build.
