@@ -14,6 +14,10 @@ for schema in orders inventory payments; do
   esac
   test "$(query "SELECT service_name FROM $schema.bootstrap_marker")" = "$service"
   test "$(query "SELECT count(*) FROM $schema.flyway_schema_history WHERE version='1' AND success")" = 1
+  if [ "$schema" = inventory ]; then
+    test "$(query "SELECT count(*) FROM inventory.flyway_schema_history WHERE version='2' AND success")" = 1
+    test "$(query "SELECT count(*) FROM pg_tables WHERE schemaname='inventory' AND tablename IN ('product','stock','reservation','reservation_line') AND tableowner=current_user")" = 4
+  fi
   test "$(query "SELECT rolsuper OR rolcreatedb OR rolcreaterole OR rolbypassrls FROM pg_roles WHERE rolname=current_user")" = f
   test "$(query "SELECT pg_get_userbyid(nspowner)=current_user FROM pg_namespace WHERE nspname='$schema'")" = t
   test "$(query "SELECT has_database_privilege(current_user,current_database(),'CREATE') OR has_schema_privilege(current_user,'public','CREATE') OR has_schema_privilege(current_user,'public','USAGE')")" = f
