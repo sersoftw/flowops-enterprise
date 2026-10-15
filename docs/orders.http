@@ -1,0 +1,36 @@
+@baseUrl = http://localhost:8081
+
+### Create (201); repeat unchanged with the same key for 200
+POST {{baseUrl}}/api/orders
+Content-Type: application/json
+Idempotency-Key: example-order-001
+
+{
+  "customerId": "f90c8ab2-5acf-4b35-8ec3-917167624075",
+  "currency": "EUR",
+  "items": [{"productId": "sku-1", "quantity": 2, "unitPrice": 12.50}]
+}
+
+### Filter and paginate
+GET {{baseUrl}}/api/orders?customerId=f90c8ab2-5acf-4b35-8ec3-917167624075&status=PENDING&page=0&size=20
+
+### Replace the ID with the value returned by POST
+GET {{baseUrl}}/api/orders/00000000-0000-0000-0000-000000000000
+
+### Conflict (409) after creating the example above
+POST {{baseUrl}}/api/orders
+Content-Type: application/json
+Idempotency-Key: example-order-001
+
+{
+  "customerId": "f90c8ab2-5acf-4b35-8ec3-917167624075",
+  "currency": "EUR",
+  "items": [{"productId": "sku-1", "quantity": 2, "unitPrice": 13.00}]
+}
+
+### Validation (400)
+POST {{baseUrl}}/api/orders
+Content-Type: application/json
+Idempotency-Key: invalid-example
+
+{"items": []}

@@ -1,6 +1,6 @@
 # FlowOps Enterprise
 
-**Day 1 — Infrastructure scaffold (not yet business-functional).**
+**Day 2 — Order domain, persistence and REST API (pending review).**
 
 Java 21, Spring Boot 4.1.1, Maven multi-module, PostgreSQL 17, Apache Kafka 4.2.2, Docker Compose.
 
@@ -89,7 +89,32 @@ scripts                         Smoke checks
 
 See [the validation record](docs/day1-validation.md) for actual results and pending gates.
 
-**Not implemented yet:** order operations, inventory reservation, payment processing, JWT, React UI, outbox, saga, DLQ, Testcontainers. These start on later days.
+## Order API (Day 2)
+
+`POST /api/orders` requires `Idempotency-Key` and creates a PENDING order (201).
+The same key/content returns the persisted order (200); different content returns 409.
+`GET /api/orders/{id}` retrieves an order; `GET /api/orders` supports `customerId`,
+`status`, zero-based `page` and `size` (1–100). Invalid requests return problem JSON (400).
+
+The [OpenAPI contract](backend/order-service/src/main/resources/static/openapi.yaml) is also
+served at `http://localhost:8081/openapi.yaml`. See [HTTP examples](docs/orders.http) and
+[ADR-0005](docs/adr/0005-order-api-and-idempotency.md) for bounds and replay semantics.
+
+```bash
+curl -i http://localhost:8081/api/orders \
+  -H 'Content-Type: application/json' -H 'Idempotency-Key: example-order-001' \
+  -d '{"customerId":"f90c8ab2-5acf-4b35-8ec3-917167624075","currency":"EUR","items":[{"productId":"sku-1","quantity":2,"unitPrice":12.50}]}'
+curl 'http://localhost:8081/api/orders?status=PENDING&page=0&size=20'
+./mvnw -B -ntp clean verify                         # fast tests; PostgreSQL tests reported skipped
+./mvnw -B -ntp -Dpostgres.tests=true clean verify    # requires Docker; mandatory in CI
+bash scripts/verify-orders.sh                      # Compose HTTP checks, including restart and replay
+```
+
+Prices are caller-supplied in this development API; totals are calculated server-side using
+BigDecimal. No catalog authority or payment processing is implied. See the
+[Day 2 validation record](docs/day2-validation.md) for actual results.
+
+**Not implemented yet:** inventory reservation, payment processing, JWT, React UI, outbox, saga, DLQ.
 
 ## Known assumptions and security boundaries
 

@@ -59,4 +59,7 @@ Only example local credentials are committed; `.env` and runtime logs remain ign
 
 Container acceptance is validated **in GitHub Actions**, not on this Windows host.
 There are no observed failing checks. The build warnings documented above remain non-blocking.
-Human review and merge are pending. Do not close Issue #1 or start Issue #2 until Day 1 is reviewed, integrated and validated after merge.
+At the end of Day 1, human review and merge were pending.
+On 2026-10-15, before starting Day 2, the GitHub API confirmed PR #15 merged into main
+on 2026-10-11, Issue #1 closed, and [post-merge CI](https://github.com/sersoftw/flowops-enterprise/actions/runs/38177523961)
+successful on main commit `3234200100d55ebbcd1de797a776b456d09adfcb`.
