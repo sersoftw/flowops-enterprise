@@ -12,13 +12,16 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 @EnabledIfSystemProperty(named = "postgres.tests", matches = "true")
 @Testcontainers
 @SpringBootTest
-class PostgresInventoryTest extends InventoryPersistenceContract {
-    @Container static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:17.6-alpine");
+class PostgresInventoryTest extends RestrictedInventoryContract {
+    @Container static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:17.6-alpine")
+            .withDatabaseName("inventory_test").withInitScript("restricted-inventory.sql");
 
     @DynamicPropertySource
     static void database(DynamicPropertyRegistry registry) {
-        registry.add("spring.datasource.url", postgres::getJdbcUrl);
-        registry.add("spring.datasource.username", postgres::getUsername);
-        registry.add("spring.datasource.password", postgres::getPassword);
+        registry.add("DB_HOST", postgres::getHost);
+        registry.add("DB_PORT", postgres::getFirstMappedPort);
+        registry.add("DB_NAME", postgres::getDatabaseName);
+        registry.add("DB_USERNAME", () -> "inventory_app");
+        registry.add("DB_PASSWORD", () -> "inventory_test_password");
     }
 }

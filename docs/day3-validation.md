@@ -61,3 +61,28 @@ and cover rollback and replay. Remote run results will be recorded on the review
 Local H2 results are not a substitute for those checks.
 
 Issue #3 stays open. Human review and merge are the next gate; Day 4 is not started.
+
+## PR #18 schema review correction (2026-10-15)
+
+Addresses P2 comment [4278148339](https://github.com/sersoftw/flowops-enterprise/pull/18#discussion_r4278148339).
+V2 now uses Flyway's current schema; JdbcInventoryStore reads the same configured
+default-schema property, validates a single 1–63-character ASCII identifier and quotes
+it before qualifying tables. Query values remain bound parameters. Application
+configuration and transaction/locking semantics are unchanged.
+
+Changed files: V2, JdbcInventoryStore, shared integration contract, PostgreSQL default
+suite, new alternate H2/PostgreSQL suites, restricted-role fixture/contract, schema
+validation tests, README, ADR-0006 and this record. PostgreSQL tests now authenticate
+as restricted owners for both inventory and inventory_alt, assert table/migration
+ownership and real SQLSTATE 42501 denials for foreign schemas and public. Each schema
+executes the complete concurrency, reserve, rollback and idempotency contract.
+
+Actual local command (same Java/Windows trust settings above):
+`mvnw.cmd -B -ntp clean verify`: BUILD SUCCESS, five modules, 60 tests passed,
+40 PostgreSQL tests explicitly skipped because local Docker remains unavailable;
+40.225 seconds. `git diff --check`: passed. PostgreSQL and Compose results for the
+correction commit are recorded in the PR description/review reply after Actions.
+
+The earlier 70-test CI evidence applies to the original Day 3 implementation, not
+this correction. V2 is still unmerged; prior disposable Day 3 databases need explicit
+recreation because its checksum changed. No automatic repair, merge or Day 4 work.

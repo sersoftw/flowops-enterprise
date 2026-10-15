@@ -14,13 +14,22 @@ compatible with order item identifiers; no foreign order tables are consulted.
 Names have 1–200 characters. Quantities are positive integers; initial stock may be
 zero. Total available plus reserved units cannot exceed Integer.MAX_VALUE.
 
-Flyway V2 owns four tables exclusively in inventory. Primary/foreign keys, positive
+Flyway V2 owns four tables exclusively in the configured inventory service schema
+(`DB_SCHEMA`, default `inventory`). Primary/foreign keys, positive
 line quantities, nonnegative balances, total capacity and status checks protect
 persistent invariants. The order UUID is the reservation primary key, not a
 cross-schema relationship. Hibernate remains in validate mode; these tables use
 explicit JDBC mappings rather than JPA entities because the operations need a small,
 auditable set of row locks and SQL statements. JdbcTemplate participates in Spring's
 JpaTransactionManager through the same DataSource. No shared-contracts changes.
+
+V2 uses unqualified table names, matching V1: Flyway applies it in its configured
+default schema. The JDBC adapter reads that same `spring.flyway.default-schema`
+property, accepts only `[A-Za-z_][A-Za-z0-9_]{0,62}`, and double-quotes the validated
+identifier when qualifying its fixed table names. SQL values remain bound parameters.
+No raw schema placeholder is interpolated into migration SQL, and JDBC does not rely
+on the pool's search path. Existing datasource currentSchema and Hibernate/Flyway
+settings continue to derive from DB_SCHEMA in application.yml.
 
 ## Transactions and concurrency
 
@@ -68,6 +77,19 @@ ordering, replenishment races, release/replay races and database constraints.
 Workers use independent transactions, a start barrier, bounded waits and exact
 final-stock assertions. H2 is not evidence of PostgreSQL concurrency correctness.
 Compose verifies application role isolation, migrations and all health endpoints.
+
+The complete integration contract also runs with `DB_SCHEMA=inventory_alt` on H2
+and PostgreSQL. Both PostgreSQL schema variants connect as separate restricted
+application owners, not the Testcontainers admin. Tests verify migration/table
+ownership, lack of database CREATE/superuser privileges, and SQLSTATE 42501 for
+reads/writes to foreign inventory, orders, payments and public schemas.
+Unit tests reject invalid/ambiguous schema identifiers before JDBC use and verify
+quoted qualification with bound values. This covers review comment 4278148339.
+
+V2 is corrected while still unmerged. A disposable database that already applied
+the earlier PR version has an obsolete V2 checksum and must be explicitly recreated
+before testing this version; no automatic Flyway repair is performed. Main databases
+that only have inventory V1 migrate normally.
 
 No reservation expiry, fulfillment, stock consumption, payment, outbox, events,
 saga, REST catalog, authentication or Day 4 behavior is implemented.

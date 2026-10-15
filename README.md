@@ -139,6 +139,11 @@ Run `./mvnw -B -ntp -Dpostgres.tests=true clean verify` with Docker for the comp
 suite, including PostgreSQL concurrency tests. Without that property, PostgreSQL
 tests are explicitly skipped. See [Day 3 validation](docs/day3-validation.md).
 
+Inventory supports `DB_SCHEMA` (default `inventory`). Provision that schema with its
+own application owner first; schema names must match `[A-Za-z_][A-Za-z0-9_]{0,62}`.
+Flyway and JDBC use the same configured schema. CI exercises both the default and
+`inventory_alt` with restricted PostgreSQL roles.
+
 **Not implemented yet:** inventory business HTTP API, payment processing, JWT, React UI, outbox, saga, DLQ.
 
 ## Known assumptions and security boundaries

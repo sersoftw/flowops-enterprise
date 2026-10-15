@@ -8,6 +8,8 @@ import java.util.concurrent.*;
 import java.util.function.Supplier;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.junit.jupiter.api.BeforeEach;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import static org.junit.jupiter.api.Assertions.*;
@@ -15,6 +17,13 @@ import static org.junit.jupiter.api.Assertions.*;
 abstract class InventoryPersistenceContract {
     @Autowired InventoryService inventory;
     @Autowired JdbcTemplate jdbc;
+    @Value("${spring.flyway.default-schema}") String schemaName;
+    private String schema;
+
+    @BeforeEach void qualifyTestSchema() {
+        assertTrue(schemaName.matches("[A-Za-z_][A-Za-z0-9_]{0,62}"));
+        schema = "\"" + schemaName + "\"";
+    }
 
     String product(int units) {
         String id = UUID.randomUUID().toString();
@@ -35,12 +44,12 @@ abstract class InventoryPersistenceContract {
         assertThrows(DataIntegrityViolationException.class, () -> inventory.createProduct(id, "Duplicate", 100));
         assertEquals(new Stock(id, 8, 0), stock(id));
         assertThrows(DataIntegrityViolationException.class, () -> jdbc.update(
-                "UPDATE inventory.stock SET available = -1 WHERE product_id = ?", id));
+                "UPDATE " + schema + ".stock SET available = -1 WHERE product_id = ?", id));
         assertThrows(DataIntegrityViolationException.class, () -> jdbc.update(
-                "UPDATE inventory.stock SET reserved = -1 WHERE product_id = ?", id));
+                "UPDATE " + schema + ".stock SET reserved = -1 WHERE product_id = ?", id));
         assertThrows(DataIntegrityViolationException.class, () -> jdbc.update(
-                "UPDATE inventory.stock SET available = 2147483647, reserved = 1 WHERE product_id = ?", id));
-        assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM inventory.flyway_schema_history WHERE version = '2' AND success = TRUE", Integer.class));
+                "UPDATE " + schema + ".stock SET available = 2147483647, reserved = 1 WHERE product_id = ?", id));
+        assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM " + schema + ".flyway_schema_history WHERE version = '2' AND success = TRUE", Integer.class));
     }
 
     @Test void reserveReplayConflictAndReleaseExactlyOnce() {
@@ -59,11 +68,11 @@ abstract class InventoryPersistenceContract {
         assertEquals(new Stock(a, 5, 0), stock(a));
         assertEquals(new Stock(b, 10, 0), stock(b));
         assertThrows(InventoryStore.Conflict.class, () -> inventory.reserve(order, line(a, 1)));
-        assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM inventory.reservation WHERE order_id = ?", Integer.class, order));
+        assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM " + schema + ".reservation WHERE order_id = ?", Integer.class, order));
         assertThrows(DataIntegrityViolationException.class, () -> jdbc.update(
-                "INSERT INTO inventory.reservation (order_id, status) VALUES (?, 'RESERVED')", order));
+                "INSERT INTO " + schema + ".reservation (order_id, status) VALUES (?, 'RESERVED')", order));
         assertThrows(DataIntegrityViolationException.class, () -> jdbc.update(
-                "UPDATE inventory.reservation_line SET quantity = 0 WHERE order_id = ?", order));
+                "UPDATE " + schema + ".reservation_line SET quantity = 0 WHERE order_id = ?", order));
     }
 
     @Test void insufficientStockRollsBackEarlierLinesAndAllowsRetry() {
@@ -74,7 +83,7 @@ abstract class InventoryPersistenceContract {
         assertThrows(Stock.InsufficientStock.class, () -> inventory.reserve(order, items));
         assertTrue(inventory.reservation(order).isEmpty());
         for (var id : ids) assertEquals(new Stock(id, 3, 0), stock(id));
-        assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM inventory.reservation_line WHERE order_id = ?", Integer.class, order));
+        assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM " + schema + ".reservation_line WHERE order_id = ?", Integer.class, order));
         inventory.replenish(ids.get(1), 1);
         assertEquals(Reservation.Status.RESERVED, inventory.reserve(order, items).status());
         assertEquals(new Stock(ids.get(0), 1, 2), stock(ids.get(0)));

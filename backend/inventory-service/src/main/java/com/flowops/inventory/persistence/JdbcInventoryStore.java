@@ -4,6 +4,7 @@ import com.flowops.inventory.application.InventoryStore;
 import com.flowops.inventory.domain.*;
 import java.util.Optional;
 import java.util.UUID;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -13,10 +14,16 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 @Repository
 public class JdbcInventoryStore implements InventoryStore {
+    private final String schema;
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
 
-    public JdbcInventoryStore(JdbcTemplate jdbc, PlatformTransactionManager manager) {
+    public JdbcInventoryStore(JdbcTemplate jdbc, PlatformTransactionManager manager,
+            @Value("${spring.flyway.default-schema}") String schema) {
+        if (schema == null || !schema.matches("[A-Za-z_][A-Za-z0-9_]{0,62}")) {
+            throw new IllegalArgumentException("Inventory schema must be a simple SQL identifier (1–63 ASCII characters)");
+        }
+        this.schema = "\"" + schema + "\"";
         this.jdbc = jdbc;
         transaction = new TransactionTemplate(manager);
         transaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
@@ -28,8 +35,8 @@ public class JdbcInventoryStore implements InventoryStore {
     public Product create(Product product, int initialStock) {
         new Stock(product.id(), initialStock, 0);
         return transaction.execute(tx -> {
-            jdbc.update("INSERT INTO inventory.product (id, name) VALUES (?, ?)", product.id(), product.name());
-            jdbc.update("INSERT INTO inventory.stock (product_id, available, reserved) VALUES (?, ?, 0)",
+            jdbc.update("INSERT INTO " + schema + ".product (id, name) VALUES (?, ?)", product.id(), product.name());
+            jdbc.update("INSERT INTO " + schema + ".stock (product_id, available, reserved) VALUES (?, ?, 0)",
                     product.id(), initialStock);
             return product;
         });
@@ -37,14 +44,14 @@ public class JdbcInventoryStore implements InventoryStore {
 
     @Override
     public Optional<Product> product(String id) {
-        return jdbc.query("SELECT id, name FROM inventory.product WHERE id = ?",
+        return jdbc.query("SELECT id, name FROM " + schema + ".product WHERE id = ?",
                 (rs, row) -> new Product(rs.getString(1), rs.getString(2)), id).stream().findFirst();
     }
 
     @Override public Optional<Stock> stock(String id) { return readStock(id, false); }
 
     private Optional<Stock> readStock(String id, boolean lock) {
-        return jdbc.query("SELECT product_id, available, reserved FROM inventory.stock WHERE product_id = ?"
+        return jdbc.query("SELECT product_id, available, reserved FROM " + schema + ".stock WHERE product_id = ?"
                         + (lock ? " FOR UPDATE" : ""),
                 (rs, row) -> new Stock(rs.getString(1), rs.getInt(2), rs.getInt(3)), id).stream().findFirst();
     }
@@ -54,7 +61,7 @@ public class JdbcInventoryStore implements InventoryStore {
     }
 
     private void saveStock(Stock stock) {
-        jdbc.update("UPDATE inventory.stock SET available = ?, reserved = ? WHERE product_id = ?",
+        jdbc.update("UPDATE " + schema + ".stock SET available = ?, reserved = ? WHERE product_id = ?",
                 stock.available(), stock.reserved(), stock.productId());
     }
 
@@ -75,11 +82,11 @@ public class JdbcInventoryStore implements InventoryStore {
                 var existing = readReservation(request.orderId(), false);
                 if (existing.isPresent()) return replay(existing.get(), request);
                 // The unique order key serializes contenders before any stock is changed.
-                jdbc.update("INSERT INTO inventory.reservation (order_id, status) VALUES (?, 'RESERVED')", request.orderId());
+                jdbc.update("INSERT INTO " + schema + ".reservation (order_id, status) VALUES (?, 'RESERVED')", request.orderId());
                 // Domain canonicalization orders all stock locks consistently across reservations/releases.
                 for (var line : request.lines()) {
                     saveStock(lockStock(line.productId()).reserve(line.quantity()));
-                    jdbc.update("INSERT INTO inventory.reservation_line (order_id, product_id, quantity) VALUES (?, ?, ?)",
+                    jdbc.update("INSERT INTO " + schema + ".reservation_line (order_id, product_id, quantity) VALUES (?, ?, ?)",
                             request.orderId(), line.productId(), line.quantity());
                 }
                 return request;
@@ -102,11 +109,11 @@ public class JdbcInventoryStore implements InventoryStore {
     }
 
     private Optional<Reservation> readReservation(UUID orderId, boolean lock) {
-        var statuses = jdbc.query("SELECT status FROM inventory.reservation WHERE order_id = ?"
+        var statuses = jdbc.query("SELECT status FROM " + schema + ".reservation WHERE order_id = ?"
                         + (lock ? " FOR UPDATE" : ""),
                 (rs, row) -> Reservation.Status.valueOf(rs.getString(1)), orderId);
         if (statuses.isEmpty()) return Optional.empty();
-        var lines = jdbc.query("SELECT product_id, quantity FROM inventory.reservation_line WHERE order_id = ?",
+        var lines = jdbc.query("SELECT product_id, quantity FROM " + schema + ".reservation_line WHERE order_id = ?",
                 (rs, row) -> new ReservationLine(rs.getString(1), rs.getInt(2)), orderId);
         return Optional.of(new Reservation(orderId, statuses.getFirst(), lines));
     }
@@ -120,7 +127,7 @@ public class JdbcInventoryStore implements InventoryStore {
             for (var line : reservation.lines()) {
                 saveStock(lockStock(line.productId()).release(line.quantity()));
             }
-            jdbc.update("UPDATE inventory.reservation SET status = 'RELEASED' WHERE order_id = ?", orderId);
+            jdbc.update("UPDATE " + schema + ".reservation SET status = 'RELEASED' WHERE order_id = ?", orderId);
             return Optional.of(new Reservation(orderId, Reservation.Status.RELEASED, reservation.lines()));
         });
     }
