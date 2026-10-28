@@ -86,7 +86,7 @@ public class OrderMessaging {
                 LoggerFactory.getLogger(getClass()).warn("event=ignored_delayed_result eventId={} orderId={} correlationId={} current={} result={}", eventId, orderId, correlation, current, target);
             }
             jdbc.update("INSERT INTO " + schema + "processed_event(event_id,aggregate_id) VALUES (?,?)", eventId, orderId);
-            LoggerFactory.getLogger(getClass()).info("event=inventory_result_applied eventId={} orderId={} correlationId={} result={}", eventId, orderId, correlation, target);
+            LoggerFactory.getLogger(getClass()).info("event=order_result_applied eventId={} orderId={} correlationId={} result={}", eventId, orderId, correlation, target);
         });
     }
 }

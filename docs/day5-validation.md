@@ -2,14 +2,14 @@
 
 ## Prerequisites
 
-PR #19 merged as bdf849c68b52677025b4528855215fd5e6e67071; Issues #1–#4 closed.
+PR #19 merged as bdf849c68b52677025b4528855215fd5e6e67071; Issues #1 through #4 closed.
 Main Actions run [40727185392](https://github.com/sersoftw/flowops-enterprise/actions/runs/40727185392)
 succeeded on that merge. Branch feat/day-05-payment-service-pagos starts from this commit.
 
 ## Local execution (2026-10-28)
 
 Java 21, Maven Wrapper 3.9.11: `./mvnw.cmd -B -ntp clean verify` completed BUILD SUCCESS
-in 48.363 seconds. Surefire/Failsafe XML totals: 184 discovered, 100 executed successfully,
+in 48.890 seconds. Surefire/Failsafe XML totals: 184 discovered, 100 executed successfully,
 84 explicitly skipped container tests, zero failures/errors. Docker is unavailable on this
 Windows host. This local result is not PostgreSQL, Kafka or Compose evidence.
 
@@ -53,3 +53,13 @@ Human review is required before merge. Issue #5 stays open; no automatic merge o
 See ADR-0008 for rollout (stop old publishers), no backfill of old reserved orders, trusted
 local Kafka producers, unbounded inbox/outbox history, partition-blocking poison events,
 at-least-once duplicate windows and unchanged missing-reservation cancellation limitation.
+
+## Failure found and corrected during CI
+
+Initial runs 40740144109 and 40740286963 exposed an inbox race under concurrent
+same-ID deliveries: the pre-lock inbox read could become stale while waiting on an
+existing payment. No duplicate payment was persisted, but a retry could still raise
+a duplicate inbox exception. The handler now rechecks the inbox after acquiring the
+payment lock. The contention test repeats six-delivery races against the existing
+payment five additional times (36 deliveries total). Local clean verify passes after
+this correction. The final PR evidence records the subsequent full CI result.

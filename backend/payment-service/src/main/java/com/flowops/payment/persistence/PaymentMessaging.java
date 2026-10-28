@@ -43,14 +43,12 @@ public class PaymentMessaging {
     }
 
     private void process(EventEnvelope<PaymentRequested> event, String canonical) {
-        var seen = jdbc.queryForList("SELECT request_json FROM " + schema + "processed_event WHERE event_id=?", String.class, event.eventId());
-        if (!seen.isEmpty()) {
-            if (!seen.getFirst().equals(canonical)) throw new IllegalArgumentException("Event ID reused with different content");
-            return;
-        }
+        if (alreadyProcessed(event, canonical)) return;
         var request = event.payload();
         var existing = jdbc.queryForList("SELECT correlation_id,causation_id,amount,currency FROM " + schema + "payment WHERE order_id=? FOR UPDATE", event.aggregateId());
         if (!existing.isEmpty()) {
+            // Another delivery may have committed its inbox while we waited for this row lock.
+            if (alreadyProcessed(event, canonical)) return;
             var row = existing.getFirst();
             if (!event.correlationId().equals(row.get("correlation_id")) || !request.causationId().equals(row.get("causation_id"))
                     || request.amount().compareTo((java.math.BigDecimal) row.get("amount")) != 0 || !request.currency().equals(row.get("currency")))
@@ -74,6 +72,12 @@ public class PaymentMessaging {
         inbox(event, canonical);
         LoggerFactory.getLogger(getClass()).info("event=payment_decided eventId={} orderId={} correlationId={} paymentId={} outcome={}",
                 event.eventId(), event.aggregateId(), event.correlationId(), payment.id(), payment.status());
+    }
+    private boolean alreadyProcessed(EventEnvelope<PaymentRequested> event, String canonical) {
+        var seen = jdbc.queryForList("SELECT request_json FROM " + schema + "processed_event WHERE event_id=?", String.class, event.eventId());
+        if (seen.isEmpty()) return false;
+        if (!seen.getFirst().equals(canonical)) throw new IllegalArgumentException("Event ID reused with different content");
+        return true;
     }
     private void inbox(EventEnvelope<PaymentRequested> event, String canonical) {
         jdbc.update("INSERT INTO " + schema + "processed_event(event_id,aggregate_id,request_json) VALUES (?,?,?)", event.eventId(), event.aggregateId(), canonical);

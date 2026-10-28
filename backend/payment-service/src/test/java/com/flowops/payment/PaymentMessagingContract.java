@@ -65,7 +65,16 @@ abstract class PaymentMessagingContract {
         assertEquals(1,count("payment_attempt")); assertEquals(1,count("processed_event"));
     }
     @Test void concurrentDeliveriesAndNewEventIdsCannotPayTwice() throws Exception {
-        var event=request("2.00"); var gate=new CountDownLatch(1);
+        var event=request("2.00");
+        raceDeliveries(event);
+        // Also contend on an existing payment with an unseen physical delivery ID.
+        for (int i=0;i<5;i++) {
+            raceDeliveries(new EventEnvelope<>(UUID.randomUUID(),event.eventType(),1,event.aggregateId(),event.correlationId(),event.occurredAt(),event.payload()));
+        }
+        assertEquals(1,count("payment")); assertEquals(1,count("payment_attempt")); assertEquals(1,count("event_outbox")); assertEquals(24,count("processed_event"));
+    }
+    private void raceDeliveries(EventEnvelope<PaymentRequested> event) throws Exception {
+        var gate=new CountDownLatch(1);
         try(var pool=Executors.newFixedThreadPool(6)) {
             var futures=new ArrayList<Future<?>>();
             for(int i=0;i<6;i++) {
@@ -74,7 +83,6 @@ abstract class PaymentMessagingContract {
             }
             gate.countDown(); for(var f:futures) f.get(20,TimeUnit.SECONDS);
         }
-        assertEquals(1,count("payment")); assertEquals(1,count("payment_attempt")); assertEquals(1,count("event_outbox")); assertEquals(4,count("processed_event"));
     }
     @Test void outboxFailureRollsBackPaymentAttemptAndInbox() {
         var event=request("2.00");
