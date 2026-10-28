@@ -1,5 +1,9 @@
 # Day 4 verification record
 
+The 2026-10-28 architectural correction and its separate test evidence are described
+in [the multiple-event outbox review](day4-outbox-review.md). Results below describe
+the original Day 4 implementation, not the correction.
+
 Date: 2026-10-15 (Europe/Madrid). Scope: Issue #4 only.
 Branch: feat/day-04-kafka-contratos-versionados.
 Base: main 19941d26e79d0878817c4ac26caa1306e68482aa.

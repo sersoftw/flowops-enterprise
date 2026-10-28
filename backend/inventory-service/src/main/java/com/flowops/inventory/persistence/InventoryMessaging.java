@@ -78,7 +78,7 @@ public class InventoryMessaging {
         Object payload = rejection == null ? new InventoryReserved(event.eventId()) : new InventoryRejected(event.eventId(), rejection);
         var result = new EventEnvelope<>(UUID.randomUUID(), type, 1, event.aggregateId(), event.correlationId(), Instant.now(), payload);
         jdbc.update("UPDATE " + schema + "inventory_decision SET result_type=? WHERE order_id=?", type, event.aggregateId());
-        jdbc.update("INSERT INTO " + schema + "event_outbox(event_id,aggregate_id,correlation_id,event_type,event_json) VALUES (?,?,?,?,?)",
+        jdbc.update("INSERT INTO " + schema + "event_outbox(event_id,aggregate_id,correlation_id,event_type,event_json,logical_event_key) VALUES (?,?,?,?,?,'InventoryDecision')",
                 result.eventId(), result.aggregateId(), result.correlationId(), result.eventType(), json.writeValueAsString(result));
         markProcessed(event);
         LoggerFactory.getLogger(getClass()).info("event=inventory_decision eventId={} orderId={} correlationId={} result={}",

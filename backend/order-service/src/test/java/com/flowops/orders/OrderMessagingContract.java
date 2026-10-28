@@ -32,11 +32,70 @@ abstract class OrderMessagingContract {
         return orders.create(key, UUID.fromString("00000000-0000-0000-0000-000000000001"), "EUR",
                 List.of(new Order.Item("sku",2,new BigDecimal("1.00")), new Order.Item("sku",3,new BigDecimal("2.00")))).order();
     }
-    UUID eventId(Order order) { return jdbc.queryForObject("SELECT event_id FROM orders.event_outbox WHERE aggregate_id=?",UUID.class,order.id()); }
+    UUID eventId(Order order) { return jdbc.queryForObject("SELECT event_id FROM orders.event_outbox WHERE aggregate_id=? AND event_type='OrderCreated'",UUID.class,order.id()); }
     String result(Order order, String type, UUID id) {
         Object payload = type.equals("InventoryReserved") ? new InventoryReserved(eventId(order))
                 : new InventoryRejected(eventId(order),InventoryRejected.Reason.INSUFFICIENT_STOCK);
         return json.writeValueAsString(new EventEnvelope<>(id,type,1,order.id(),order.id(),Instant.now(),payload));
+    }
+
+    UUID probe(Order order) {
+        UUID id=UUID.randomUUID();
+        // Storage-only fixture, not a new production event contract.
+        jdbc.update("INSERT INTO orders.event_outbox(event_id,aggregate_id,correlation_id,event_type,event_json) VALUES (?,?,?,'ArchitectureProbe',?)",
+                id,order.id(),order.id(),json.writeValueAsString(Map.of("eventId",id)));
+        return id;
+    }
+
+    @Test void multipleEventsPerAggregateRetainLogicalAndPhysicalUniqueness() {
+        var order=create("multiple"); UUID first=probe(order); probe(order);
+        assertEquals(3,jdbc.queryForObject("SELECT COUNT(*) FROM orders.event_outbox WHERE aggregate_id=?",Integer.class,order.id()));
+        assertEquals(order,create("multiple"));
+        for (String logicalKey : Arrays.asList("OrderCreated",null,"bypass")) {
+            assertThrows(org.springframework.dao.DataIntegrityViolationException.class,()->jdbc.update(
+                    "INSERT INTO orders.event_outbox(event_id,aggregate_id,correlation_id,event_type,event_json,logical_event_key) VALUES (?,?,?,'OrderCreated','{}',?)",
+                    UUID.randomUUID(),order.id(),order.id(),logicalKey));
+        }
+        assertThrows(org.springframework.dao.DataIntegrityViolationException.class,()->jdbc.update(
+                "INSERT INTO orders.event_outbox(event_id,aggregate_id,correlation_id,event_type,event_json) VALUES (?,?,?,'ArchitectureProbe','{}')",
+                first,UUID.randomUUID(),order.id()));
+        assertEquals(3,jdbc.queryForObject("SELECT COUNT(*) FROM orders.event_outbox",Integer.class));
+    }
+
+    @Test void causationMustReferenceTheOriginalCreatedEventNotAnotherOutboxRow() {
+        var order=create("causality"); UUID unrelated=probe(order); probe(order);
+        var invalid=new EventEnvelope<>(UUID.randomUUID(),"InventoryReserved",1,order.id(),order.id(),Instant.now(),new InventoryReserved(unrelated));
+        assertThrows(IllegalArgumentException.class,()->messaging.accept(order.id().toString(),json.writeValueAsString(invalid)));
+        var wrongCorrelation=new EventEnvelope<>(UUID.randomUUID(),"InventoryReserved",1,order.id(),UUID.randomUUID(),Instant.now(),new InventoryReserved(eventId(order)));
+        assertThrows(IllegalArgumentException.class,()->messaging.accept(order.id().toString(),json.writeValueAsString(wrongCorrelation)));
+        assertEquals(Order.Status.PENDING,orders.get(order.id()).status());
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM orders.processed_event",Integer.class));
+        String valid=result(order,"InventoryReserved",UUID.randomUUID());
+        messaging.accept(order.id().toString(),valid); messaging.accept(order.id().toString(),valid);
+        assertEquals(Order.Status.INVENTORY_RESERVED,orders.get(order.id()).status());
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM orders.processed_event",Integer.class));
+        assertEquals(3,jdbc.queryForObject("SELECT COUNT(*) FROM orders.event_outbox",Integer.class));
+    }
+
+    @Test @SuppressWarnings("unchecked") void relayMarksIndividualEventsAndRetriesOnlyTheFailedRow() {
+        var order=create("multi-relay");
+        jdbc.update("UPDATE orders.event_outbox SET published_at=CURRENT_TIMESTAMP WHERE event_id=?",eventId(order));
+        probe(order); probe(order);
+        KafkaTemplate<String,String> kafka=mock(KafkaTemplate.class);
+        var relay=new OutboxRelay(jdbc,kafka,manager,"orders");
+        when(kafka.send(anyString(),anyString(),anyString())).thenReturn(CompletableFuture.completedFuture(null));
+        assertTrue(relay.publishNext());
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM orders.event_outbox WHERE published_at IS NULL",Integer.class));
+        when(kafka.send(anyString(),anyString(),anyString())).thenReturn(CompletableFuture.failedFuture(new RuntimeException("offline")));
+        assertThrows(IllegalStateException.class,relay::publishNext);
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM orders.event_outbox WHERE published_at IS NULL",Integer.class));
+        when(kafka.send(anyString(),anyString(),anyString())).thenReturn(CompletableFuture.completedFuture(null));
+        assertTrue(relay.publishNext()); assertFalse(relay.publishNext());
+        var sent=org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(kafka,times(3)).send(eq("flowops.orders.v1"),eq(order.id().toString()),sent.capture());
+        assertNotEquals(sent.getAllValues().get(0),sent.getAllValues().get(1));
+        assertEquals(sent.getAllValues().get(1),sent.getAllValues().get(2));
+        assertEquals(3,jdbc.queryForObject("SELECT COUNT(*) FROM orders.event_outbox WHERE published_at IS NOT NULL",Integer.class));
     }
 
     @Test void creationAndReplayWriteExactlyOneOutboxWithSummedRequirements() {

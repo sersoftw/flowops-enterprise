@@ -13,6 +13,7 @@ import static org.junit.jupiter.api.Assertions.*;
 abstract class InventoryMessagingContract extends InventoryPersistenceContract {
     @Autowired InventoryMessaging messaging;
     @Autowired ObjectMapper json;
+    @Autowired org.springframework.transaction.PlatformTransactionManager manager;
     String event(UUID order, UUID id, String product, int quantity) {
         return json.writeValueAsString(new EventEnvelope<>(id,"OrderCreated",1,order,order,Instant.now(),
                 new OrderCreated(List.of(new OrderCreated.Item(product,quantity)))));
@@ -23,7 +24,61 @@ abstract class InventoryMessagingContract extends InventoryPersistenceContract {
                 + " WHERE " + (table.equals("inventory_decision") ? "order_id" : "aggregate_id") + "=?",Integer.class,order);
     }
     String result(UUID order) {
-        return jdbc.queryForObject("SELECT event_type FROM \"" + schemaName + "\".event_outbox WHERE aggregate_id=?",String.class,order);
+        return jdbc.queryForObject("SELECT event_type FROM \"" + schemaName + "\".event_outbox WHERE aggregate_id=? AND logical_event_key='InventoryDecision'",String.class,order);
+    }
+
+    UUID probe(UUID order) {
+        UUID id=UUID.randomUUID();
+        jdbc.update("INSERT INTO \"" + schemaName + "\".event_outbox(event_id,aggregate_id,correlation_id,event_type,event_json) VALUES (?,?,?,'ArchitectureProbe',?)",
+                id,order,order,json.writeValueAsString(Map.of("eventId",id)));
+        return id;
+    }
+
+    @Test void multipleOutboxEventsPreserveExactlyOneInventoryDecision() {
+        for (int quantity : List.of(2,9)) {
+            var sku=product(5); var order=UUID.randomUUID(); var raw=event(order,UUID.randomUUID(),sku,quantity);
+            messaging.accept(order.toString(),raw); UUID probeId=probe(order); probe(order);
+            messaging.accept(order.toString(),raw);
+            messaging.accept(order.toString(),event(order,UUID.randomUUID(),sku,quantity));
+            assertEquals(3,count("event_outbox",order)); assertEquals(1,count("inventory_decision",order));
+            assertEquals(quantity==2 ? new Stock(sku,3,2) : new Stock(sku,5,0),stock(sku));
+            for (String type : List.of("InventoryReserved","InventoryRejected")) {
+                for (String key : Arrays.asList("InventoryDecision",null,"bypass")) {
+                    assertThrows(org.springframework.dao.DataIntegrityViolationException.class,()->jdbc.update(
+                            "INSERT INTO \"" + schemaName + "\".event_outbox(event_id,aggregate_id,correlation_id,event_type,event_json,logical_event_key) VALUES (?,?,?,?, '{}',?)",
+                            UUID.randomUUID(),order,order,type,key));
+                }
+            }
+            assertThrows(org.springframework.dao.DataIntegrityViolationException.class,()->jdbc.update(
+                    "INSERT INTO \"" + schemaName + "\".event_outbox(event_id,aggregate_id,correlation_id,event_type,event_json) VALUES (?,?,?,'ArchitectureProbe','{}')",
+                    probeId,UUID.randomUUID(),order));
+            assertEquals(3,count("event_outbox",order));
+        }
+    }
+
+    @Test @SuppressWarnings("unchecked") void inventoryRelayPublishesEachRowWithoutMarkingSiblingEvents() {
+        String table="\"" + schemaName + "\".event_outbox";
+        // Drain unrelated fixtures in this isolated test database before selecting pending rows.
+        jdbc.update("UPDATE "+table+" SET published_at=CURRENT_TIMESTAMP WHERE published_at IS NULL");
+        var order=UUID.randomUUID(); probe(order); probe(order);
+        org.springframework.kafka.core.KafkaTemplate<String,String> kafka=org.mockito.Mockito.mock(org.springframework.kafka.core.KafkaTemplate.class);
+        var relay=new com.flowops.inventory.messaging.OutboxRelay(jdbc,kafka,manager,schemaName);
+        org.mockito.Mockito.when(kafka.send(org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString()))
+                .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(null));
+        assertTrue(relay.publishNext());
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM "+table+" WHERE aggregate_id=? AND published_at IS NULL",Integer.class,order));
+        org.mockito.Mockito.when(kafka.send(org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString()))
+                .thenReturn(java.util.concurrent.CompletableFuture.failedFuture(new RuntimeException("offline")));
+        assertThrows(IllegalStateException.class,relay::publishNext);
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM "+table+" WHERE aggregate_id=? AND published_at IS NULL",Integer.class,order));
+        org.mockito.Mockito.when(kafka.send(org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString()))
+                .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(null));
+        assertTrue(relay.publishNext()); assertFalse(relay.publishNext());
+        var sent=org.mockito.ArgumentCaptor.forClass(String.class);
+        org.mockito.Mockito.verify(kafka,org.mockito.Mockito.times(3)).send(org.mockito.ArgumentMatchers.eq("flowops.inventory.v1"),
+                org.mockito.ArgumentMatchers.eq(order.toString()),sent.capture());
+        assertNotEquals(sent.getAllValues().get(0),sent.getAllValues().get(1));
+        assertEquals(sent.getAllValues().get(1),sent.getAllValues().get(2));
     }
 
     @Test void concurrentDeliveryAndNewEventIdDeduplicateByOrder() throws Exception {

@@ -108,7 +108,8 @@ class KafkaFlowIT {
         return json.readTree(response.body()).get("status").asText();
     }
     static String outbox(String schema,UUID id) throws Exception {
-        return value(schema,"SELECT event_json FROM "+schema+".event_outbox WHERE aggregate_id=?",id);
+        return value(schema,"SELECT event_json FROM "+schema+".event_outbox WHERE aggregate_id=? AND logical_event_key=?",
+                id,schema.equals("orders") ? "OrderCreated" : "InventoryDecision");
     }
     static void send(String topic,UUID order,String raw) throws Exception {
         var props=new Properties();
@@ -196,13 +197,39 @@ class KafkaFlowIT {
         await(30,()->"INVENTORY_RESERVED".equals(status(order)));
         String before=outbox("orders",order);
         stop(orders);
-        sql("orders","UPDATE orders.event_outbox SET published_at=NULL WHERE aggregate_id=?",order);
+        sql("orders","UPDATE orders.event_outbox SET published_at=NULL WHERE aggregate_id=? AND event_type='OrderCreated'",order);
         orders=startService("order",orderPort);
-        await(20,()->value("orders","SELECT published_at FROM orders.event_outbox WHERE aggregate_id=?",order)!=null);
+        await(20,()->value("orders","SELECT published_at FROM orders.event_outbox WHERE aggregate_id=? AND event_type='OrderCreated'",order)!=null);
         assertEquals(before,outbox("orders",order));
         assertEquals("INVENTORY_RESERVED",status(order));
         assertEquals("2",value("inventory","SELECT reserved FROM inventory.stock WHERE product_id=?",sku));
         assertEquals("1",value("inventory","SELECT count(*) FROM inventory.event_outbox WHERE aggregate_id=?",order));
+    }
+
+    @Test void multipleHistoricalEventsDoNotConfuseCausationOrDeduplication() throws Exception {
+        String sku=product(6);
+        stop(inventory);
+        UUID order=create(sku,2);
+        for (String schema : List.of("orders","inventory")) {
+            for (int i=0;i<2;i++) {
+                // Storage-only historical fixtures: do not introduce a new Kafka contract or consumer.
+                sql(schema,"INSERT INTO "+schema+".event_outbox(event_id,aggregate_id,correlation_id,event_type,event_json,published_at) "
+                        +"VALUES (?,?,?,'ArchitectureProbe','{}',CURRENT_TIMESTAMP)",UUID.randomUUID(),order,order);
+            }
+        }
+        inventory=startService("inventory",inventoryPort);
+        await(30,()->"INVENTORY_RESERVED".equals(status(order)));
+        String original=outbox("orders",order);
+        send("flowops.orders.v1",order,original);
+        var duplicate=(ObjectNode)json.readTree(original);
+        UUID replay=UUID.randomUUID(); duplicate.put("eventId",replay.toString());
+        send("flowops.orders.v1",order,json.writeValueAsString(duplicate));
+        await(20,()->"1".equals(value("inventory","SELECT COUNT(*) FROM inventory.processed_event WHERE event_id=?",replay)));
+        for (String schema : List.of("orders","inventory")) {
+            assertEquals("3",value(schema,"SELECT COUNT(*) FROM "+schema+".event_outbox WHERE aggregate_id=?",order));
+        }
+        assertEquals("2",value("inventory","SELECT reserved FROM inventory.stock WHERE product_id=?",sku));
+        assertEquals("INVENTORY_RESERVED",status(order));
     }
 
     @FunctionalInterface interface Condition { boolean evaluate() throws Exception; }

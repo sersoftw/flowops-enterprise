@@ -34,7 +34,7 @@ public class OrderMessaging {
                 .map(e -> new OrderCreated.Item(e.getKey(), e.getValue())).toList());
         var event = new EventEnvelope<>(UUID.randomUUID(), "OrderCreated", 1, order.id(), order.id(), order.createdAt(), payload);
         jdbc.update("INSERT INTO " + schema + "event_outbox "
-                + "(event_id, aggregate_id, correlation_id, event_type, event_json) VALUES (?, ?, ?, ?, ?)",
+                + "(event_id, aggregate_id, correlation_id, event_type, event_json, logical_event_key) VALUES (?, ?, ?, ?, ?, 'OrderCreated')",
                 event.eventId(), event.aggregateId(), event.correlationId(), event.eventType(), json.writeValueAsString(event));
     }
 
@@ -52,9 +52,10 @@ public class OrderMessaging {
         transaction.executeWithoutResult(tx -> {
             var statuses = jdbc.queryForList("SELECT status FROM " + schema + "purchase_order WHERE id=? FOR UPDATE", String.class, orderId);
             if (statuses.isEmpty()) throw new IllegalStateException("Order not yet present; retry without committing offset");
-            var expected = jdbc.queryForList("SELECT event_id FROM " + schema + "event_outbox WHERE aggregate_id=? AND correlation_id=?",
-                    UUID.class, orderId, correlation);
-            if (expected.isEmpty() || !expected.getFirst().equals(causation)) throw new IllegalArgumentException("Unrelated inventory result");
+            var expected = jdbc.queryForList("SELECT event_id FROM " + schema
+                    + "event_outbox WHERE event_id=? AND event_type='OrderCreated' AND aggregate_id=? AND correlation_id=?",
+                    UUID.class, causation, orderId, correlation);
+            if (expected.isEmpty()) throw new IllegalArgumentException("Unrelated inventory result");
             if (jdbc.queryForObject("SELECT COUNT(*) FROM " + schema + "processed_event WHERE event_id=?", Integer.class, eventId) != 0) return;
             String target = "InventoryReserved".equals(type) ? "INVENTORY_RESERVED" : "INVENTORY_REJECTED";
             // First valid outcome wins. Delayed contradictory outcomes never regress state.
