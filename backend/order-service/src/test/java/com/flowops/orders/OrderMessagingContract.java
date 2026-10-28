@@ -74,7 +74,7 @@ abstract class OrderMessagingContract {
         messaging.accept(order.id().toString(),valid); messaging.accept(order.id().toString(),valid);
         assertEquals(Order.Status.INVENTORY_RESERVED,orders.get(order.id()).status());
         assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM orders.processed_event",Integer.class));
-        assertEquals(3,jdbc.queryForObject("SELECT COUNT(*) FROM orders.event_outbox",Integer.class));
+        assertEquals(4,jdbc.queryForObject("SELECT COUNT(*) FROM orders.event_outbox",Integer.class));
     }
 
     @Test @SuppressWarnings("unchecked") void relayMarksIndividualEventsAndRetriesOnlyTheFailedRow() {
@@ -151,5 +151,54 @@ abstract class OrderMessagingContract {
         assertThrows(IllegalArgumentException.class,()->messaging.accept(order.id().toString(),json.writeValueAsString(bad)));
         assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM orders.processed_event",Integer.class));
         assertEquals(Order.Status.PENDING,orders.get(order.id()).status());
+    }
+
+    @Test void inventoryConfirmationAtomicallyRequestsServerComputedPaymentOnce() {
+        var order=create("payment-once"); UUID inventoryId=UUID.randomUUID();
+        String confirmed=result(order,"InventoryReserved",inventoryId);
+        messaging.accept(order.id().toString(),confirmed);
+        messaging.accept(order.id().toString(),confirmed);
+        messaging.accept(order.id().toString(),result(order,"InventoryReserved",UUID.randomUUID()));
+        var request=json.readTree(jdbc.queryForObject("SELECT event_json FROM orders.event_outbox WHERE event_type='PaymentRequested'",String.class));
+        assertEquals("8.00",request.at("/payload/amount").decimalValue().setScale(2).toString());
+        assertEquals("EUR",request.at("/payload/currency").asText());
+        assertEquals(inventoryId.toString(),request.at("/payload/causationId").asText());
+        assertEquals(2,jdbc.queryForObject("SELECT count(*) FROM orders.event_outbox",Integer.class));
+        for(String logical:Arrays.asList(null,"PaymentRequested","wrong")) {
+            assertThrows(org.springframework.dao.DataIntegrityViolationException.class,()->jdbc.update(
+                    "INSERT INTO orders.event_outbox(event_id,aggregate_id,correlation_id,event_type,event_json,logical_event_key) VALUES (?,?,?,'PaymentRequested','{}',?)",
+                    UUID.randomUUID(),order.id(),order.id(),logical));
+        }
+    }
+    @Test void paymentRequestFailureRollsBackInventoryTransitionAndInbox() {
+        var order=create("payment-rollback"); String confirmed=result(order,"InventoryReserved",UUID.randomUUID());
+        jdbc.execute("ALTER TABLE orders.event_outbox ADD CONSTRAINT reject_payment_test CHECK (event_type <> 'PaymentRequested')");
+        try {
+            assertThrows(RuntimeException.class,()->messaging.accept(order.id().toString(),confirmed));
+            assertEquals(Order.Status.PENDING,orders.get(order.id()).status());
+            assertEquals(0,jdbc.queryForObject("SELECT count(*) FROM orders.processed_event",Integer.class));
+        } finally {jdbc.execute("ALTER TABLE orders.event_outbox DROP CONSTRAINT reject_payment_test");}
+        messaging.accept(order.id().toString(),confirmed);
+        assertEquals(Order.Status.INVENTORY_RESERVED,orders.get(order.id()).status());
+    }
+    String paymentResult(Order order,UUID cause,boolean success) {
+        Object payload=success ? new PaymentSucceeded(cause,UUID.randomUUID()) : new PaymentFailed(cause,UUID.randomUUID(),PaymentFailed.Reason.SIMULATED_DECLINE);
+        return json.writeValueAsString(new EventEnvelope<>(UUID.randomUUID(),success ? "PaymentSucceeded" : "PaymentFailed",1,order.id(),order.id(),Instant.now(),payload));
+    }
+    @Test void paymentResultsRequireTheirRequestAndNeverRegressTerminalState() {
+        for(boolean success:List.of(true,false)) {
+            var order=create("payment-result-"+success);
+            assertThrows(IllegalArgumentException.class,()->messaging.accept(order.id().toString(),paymentResult(order,eventId(order),success)));
+            assertEquals(Order.Status.PENDING,orders.get(order.id()).status());
+            messaging.accept(order.id().toString(),result(order,"InventoryReserved",UUID.randomUUID()));
+            UUID cause=jdbc.queryForObject("SELECT event_id FROM orders.event_outbox WHERE aggregate_id=? AND event_type='PaymentRequested'",UUID.class,order.id());
+            String outcome=paymentResult(order,cause,success);
+            messaging.accept(order.id().toString(),outcome); messaging.accept(order.id().toString(),outcome);
+            messaging.accept(order.id().toString(),paymentResult(order,cause,!success));
+            messaging.accept(order.id().toString(),result(order,"InventoryReserved",UUID.randomUUID()));
+            messaging.accept(order.id().toString(),result(order,"InventoryRejected",UUID.randomUUID()));
+            assertEquals(success ? Order.Status.COMPLETED : Order.Status.PAYMENT_FAILED_PENDING_COMPENSATION,orders.get(order.id()).status());
+            assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM orders.event_outbox WHERE aggregate_id=? AND event_type='PaymentRequested'",Integer.class,order.id()));
+        }
     }
 }

@@ -23,7 +23,7 @@ request() {
 
 request 201 -H 'Content-Type: application/json' -H "Idempotency-Key: $key" -d "$body" "$base/api/orders"
 id=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["status"] == "PENDING" and d["total"] == 25; print(d["id"])' "$work/response.json")
-request 200 "$base/api/orders?customerId=$customer&status=PENDING&size=1"
+request 200 "$base/api/orders?customerId=$customer&size=1"
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["totalElements"] == 1 and d["content"][0]["id"] == sys.argv[2]' "$work/response.json" "$id"
 request 400 -H 'Content-Type: application/json' -H "Idempotency-Key: invalid-$key" -d '{}' "$base/api/orders"
 request 409 -H 'Content-Type: application/json' -H "Idempotency-Key: $key" -d "${body/12.50/13.00}" "$base/api/orders"

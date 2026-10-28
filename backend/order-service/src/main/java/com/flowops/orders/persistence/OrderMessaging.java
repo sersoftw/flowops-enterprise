@@ -47,25 +47,46 @@ public class OrderMessaging {
         } else if ("InventoryRejected".equals(type)) {
             var event = json.readValue(raw, new TypeReference<EventEnvelope<InventoryRejected>>() {});
             eventId = event.eventId(); orderId = event.aggregateId(); correlation = event.correlationId(); causation = event.payload().causationId();
-        } else { throw new IllegalArgumentException("Expected an inventory result"); }
+        } else if ("PaymentSucceeded".equals(type)) {
+            var event = json.readValue(raw, new TypeReference<EventEnvelope<PaymentSucceeded>>() {});
+            eventId = event.eventId(); orderId = event.aggregateId(); correlation = event.correlationId(); causation = event.payload().causationId();
+        } else if ("PaymentFailed".equals(type)) {
+            var event = json.readValue(raw, new TypeReference<EventEnvelope<PaymentFailed>>() {});
+            eventId = event.eventId(); orderId = event.aggregateId(); correlation = event.correlationId(); causation = event.payload().causationId();
+        } else { throw new IllegalArgumentException("Expected an inventory or payment result"); }
+        boolean paymentResult = type.startsWith("Payment");
         if (!orderId.toString().equals(key)) throw new IllegalArgumentException("Kafka key must match aggregateId");
         transaction.executeWithoutResult(tx -> {
             var statuses = jdbc.queryForList("SELECT status FROM " + schema + "purchase_order WHERE id=? FOR UPDATE", String.class, orderId);
             if (statuses.isEmpty()) throw new IllegalStateException("Order not yet present; retry without committing offset");
             var expected = jdbc.queryForList("SELECT event_id FROM " + schema
-                    + "event_outbox WHERE event_id=? AND event_type='OrderCreated' AND aggregate_id=? AND correlation_id=?",
-                    UUID.class, causation, orderId, correlation);
-            if (expected.isEmpty()) throw new IllegalArgumentException("Unrelated inventory result");
+                    + "event_outbox WHERE event_id=? AND event_type=? AND aggregate_id=? AND correlation_id=?",
+                    UUID.class, causation, paymentResult ? "PaymentRequested" : "OrderCreated", orderId, correlation);
+            if (expected.isEmpty()) throw new IllegalArgumentException("Missing or unrelated causal request; retry without committing offset");
             if (jdbc.queryForObject("SELECT COUNT(*) FROM " + schema + "processed_event WHERE event_id=?", Integer.class, eventId) != 0) return;
-            String target = "InventoryReserved".equals(type) ? "INVENTORY_RESERVED" : "INVENTORY_REJECTED";
-            // First valid outcome wins. Delayed contradictory outcomes never regress state.
-            if ("PENDING".equals(statuses.getFirst())) {
+            String target = switch (type) {
+                case "InventoryReserved" -> "INVENTORY_RESERVED";
+                case "InventoryRejected" -> "INVENTORY_REJECTED";
+                case "PaymentSucceeded" -> "COMPLETED";
+                case "PaymentFailed" -> "PAYMENT_FAILED_PENDING_COMPENSATION";
+                default -> throw new IllegalArgumentException("Unknown result");
+            };
+            String current = statuses.getFirst();
+            boolean transition = paymentResult ? "INVENTORY_RESERVED".equals(current) : "PENDING".equals(current);
+            if (transition) {
                 jdbc.update("UPDATE " + schema + "purchase_order SET status=? WHERE id=?", target, orderId);
-            } else if (!target.equals(statuses.getFirst())) {
-                LoggerFactory.getLogger(getClass()).warn("event=conflicting_inventory_result eventId={} orderId={} correlationId={}", eventId, orderId, correlation);
+                if ("InventoryReserved".equals(type)) {
+                    var amounts = jdbc.queryForMap("SELECT total,currency FROM " + schema + "purchase_order WHERE id=?", orderId);
+                    var request = new PaymentRequested(eventId, (java.math.BigDecimal) amounts.get("total"), (String) amounts.get("currency"));
+                    var payment = new EventEnvelope<>(UUID.randomUUID(), "PaymentRequested", 1, orderId, correlation, java.time.Instant.now(), request);
+                    jdbc.update("INSERT INTO " + schema + "event_outbox(event_id,aggregate_id,correlation_id,event_type,event_json,logical_event_key) VALUES (?,?,?,?,?,'PaymentRequested')",
+                            payment.eventId(), orderId, correlation, payment.eventType(), json.writeValueAsString(payment));
+                }
+            } else if (!target.equals(current)) {
+                LoggerFactory.getLogger(getClass()).warn("event=ignored_delayed_result eventId={} orderId={} correlationId={} current={} result={}", eventId, orderId, correlation, current, target);
             }
             jdbc.update("INSERT INTO " + schema + "processed_event(event_id,aggregate_id) VALUES (?,?)", eventId, orderId);
-            LoggerFactory.getLogger(getClass()).info("event=inventory_result_applied eventId={} orderId={} correlationId={} result={}", eventId, orderId, correlation, target);
+            LoggerFactory.getLogger(getClass()).info("event=order_result_applied eventId={} orderId={} correlationId={} result={}", eventId, orderId, correlation, target);
         });
     }
 }

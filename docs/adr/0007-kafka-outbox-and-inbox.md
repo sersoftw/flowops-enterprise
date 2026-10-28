@@ -1,6 +1,10 @@
 # ADR-0007: First asynchronous order/inventory flow
 
-**Status:** Implemented for Day 4, pending review.
+**Status:** Implemented for Day 4.
+
+Day 5 extends the workflow and replaces the relay ordering limitation below with
+[ADR-0008](0008-simulated-payments-and-causal-publication.md). Day 4 sections describe
+the original baseline; payment behavior and append-only upgrades are defined there.
 
 ## Contracts and boundaries
 

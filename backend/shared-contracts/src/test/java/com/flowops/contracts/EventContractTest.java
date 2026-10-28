@@ -13,7 +13,10 @@ class EventContractTest {
         var id = UUID.randomUUID();
         var payloads = Map.of("OrderCreated", new OrderCreated(List.of(new OrderCreated.Item("sku", 2))),
                 "InventoryReserved", new InventoryReserved(id),
-                "InventoryRejected", new InventoryRejected(id, InventoryRejected.Reason.INSUFFICIENT_STOCK));
+                "InventoryRejected", new InventoryRejected(id, InventoryRejected.Reason.INSUFFICIENT_STOCK),
+                "PaymentRequested", new PaymentRequested(id, new java.math.BigDecimal("12.50"), "EUR"),
+                "PaymentSucceeded", new PaymentSucceeded(id,id),
+                "PaymentFailed", new PaymentFailed(id,id,PaymentFailed.Reason.SIMULATED_DECLINE));
         for (var entry : payloads.entrySet()) {
             var event = new EventEnvelope<>(id, entry.getKey(), 1, id, id, Instant.parse("2026-10-15T00:00:00Z"), entry.getValue());
             String raw = json.writeValueAsString(event);

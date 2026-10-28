@@ -1,0 +1,12 @@
+REVOKE ALL ON DATABASE flowops FROM PUBLIC;
+REVOKE ALL ON SCHEMA public FROM PUBLIC;
+CREATE ROLE payments_app LOGIN PASSWORD 'test_payments' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+GRANT CONNECT ON DATABASE flowops TO payments_app;
+CREATE SCHEMA payments_alt AUTHORIZATION payments_app;
+CREATE SCHEMA orders;
+CREATE SCHEMA inventory;
+CREATE SCHEMA payments;
+CREATE TABLE orders.private_data(id INTEGER);
+CREATE TABLE inventory.private_data(id INTEGER);
+CREATE TABLE payments.private_data(id INTEGER);
+CREATE TABLE public.private_data(id INTEGER);

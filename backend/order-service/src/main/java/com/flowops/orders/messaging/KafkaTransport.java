@@ -19,6 +19,9 @@ public class KafkaTransport {
     private final OrderMessaging handler;
     public KafkaTransport(OrderMessaging handler) { this.handler = handler; }
 
+    @Bean NewTopic paymentRequestsTopic() { return TopicBuilder.name("flowops.payment-requests.v1").partitions(3).replicas(1).build(); }
+    @Bean NewTopic paymentsTopic() { return TopicBuilder.name("flowops.payments.v1").partitions(3).replicas(1).build(); }
+
     @Bean NewTopic ordersTopic() { return TopicBuilder.name("flowops.orders.v1").partitions(3).replicas(1).build(); }
     @Bean NewTopic inventoryTopic() { return TopicBuilder.name("flowops.inventory.v1").partitions(3).replicas(1).build(); }
 
@@ -30,7 +33,7 @@ public class KafkaTransport {
         return errors;
     }
 
-    @KafkaListener(id="flowops-order-v1", topics="flowops.inventory.v1", groupId="flowops-order-v1")
+    @KafkaListener(id="flowops-order-v1", topics={"flowops.inventory.v1", "flowops.payments.v1"}, groupId="flowops-order-v1")
     public void consume(ConsumerRecord<String,String> record) {
         handler.accept(record.key(), record.value());
     }

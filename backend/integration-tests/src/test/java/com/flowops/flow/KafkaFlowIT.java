@@ -29,22 +29,23 @@ class KafkaFlowIT {
     @Container static final KafkaContainer kafka = new KafkaContainer("apache/kafka:4.2.2");
     static final ObjectMapper json = new ObjectMapper();
     static final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
-    static Process orders, inventory;
-    static int orderPort, inventoryPort;
+    static Process orders, inventory, payment;
+    static int orderPort, inventoryPort, paymentPort;
     static final Path target = Path.of("target").toAbsolutePath();
 
     @BeforeAll static void start() throws Exception {
         Files.createDirectories(target);
-        orderPort=freePort(); inventoryPort=freePort();
+        orderPort=freePort(); inventoryPort=freePort(); paymentPort=freePort();
         try {
             inventory=startService("inventory",inventoryPort);
+            payment=startService("payment",paymentPort);
             orders=startService("order",orderPort);
-        } catch (Exception | AssertionError failure) { stop(orders); stop(inventory); throw failure; }
+        } catch (Exception | AssertionError failure) { stop(orders); stop(inventory); stop(payment); throw failure; }
     }
-    @AfterAll static void finish() throws Exception { stop(orders); stop(inventory); }
+    @AfterAll static void finish() throws Exception { stop(orders); stop(inventory); stop(payment); }
     static int freePort() throws Exception { try (var socket=new java.net.ServerSocket(0)) { return socket.getLocalPort(); } }
     static Process startService(String service, int port) throws Exception {
-        String schema=service.equals("order") ? "orders" : "inventory";
+        String schema=service.equals("order") ? "orders" : service.equals("payment") ? "payments" : "inventory";
         Path jar=Path.of("..",service+"-service","target",service+"-service-0.1.0-SNAPSHOT.jar").toAbsolutePath().normalize();
         assertTrue(Files.isRegularFile(jar),"Run root Maven verify so the service JARs are packaged first: "+jar);
         var process=new ProcessBuilder(Path.of(System.getProperty("java.home"),"bin","java").toString(),"-Xmx256m","-jar",jar.toString(),
@@ -90,8 +91,11 @@ class KafkaFlowIT {
         return sku;
     }
     static UUID create(String sku,int quantity) throws Exception {
+        return create(sku,quantity,1);
+    }
+    static UUID create(String sku,int quantity,int price) throws Exception {
         String raw=json.writeValueAsString(Map.of("customerId",UUID.randomUUID(),"currency","EUR",
-                "items",List.of(Map.of("productId",sku,"quantity",quantity,"unitPrice",1))));
+                "items",List.of(Map.of("productId",sku,"quantity",quantity,"unitPrice",price))));
         var response=http.send(HttpRequest.newBuilder(URI.create("http://localhost:"+orderPort+"/api/orders"))
                 .timeout(Duration.ofSeconds(10)).header("Content-Type","application/json")
                 .header("Idempotency-Key",UUID.randomUUID().toString()).POST(HttpRequest.BodyPublishers.ofString(raw)).build(),
@@ -141,7 +145,7 @@ class KafkaFlowIT {
 
     @Test void orderEventReservesAndUpdatesOrderAndSurvivesConsumerRestart() throws Exception {
         String sku=product(10); UUID first=create(sku,3);
-        await(30,()->"INVENTORY_RESERVED".equals(status(first)));
+        await(30,()->"COMPLETED".equals(status(first)));
         var created=observe("flowops.orders.v1",first);
         var envelope=json.readTree(created.value());
         assertEquals("OrderCreated",envelope.get("eventType").asText());
@@ -160,7 +164,7 @@ class KafkaFlowIT {
         send("flowops.orders.v1",first,created.value());
         // Replay the exact outbox event after the consumer's durable state has been committed.
         inventory=startService("inventory",inventoryPort);
-        await(30,()->"INVENTORY_RESERVED".equals(status(queued)));
+        await(30,()->"COMPLETED".equals(status(queued)));
         var replay=(ObjectNode)json.readTree(created.value());
         UUID replayId=UUID.randomUUID(); replay.put("eventId",replayId.toString());
         send("flowops.orders.v1",first,json.writeValueAsString(replay));
@@ -194,14 +198,14 @@ class KafkaFlowIT {
 
     @Test void relayRepublishesStableEventAfterOrderProcessRestart() throws Exception {
         String sku=product(4); UUID order=create(sku,2);
-        await(30,()->"INVENTORY_RESERVED".equals(status(order)));
+        await(30,()->"COMPLETED".equals(status(order)));
         String before=outbox("orders",order);
         stop(orders);
         sql("orders","UPDATE orders.event_outbox SET published_at=NULL WHERE aggregate_id=? AND event_type='OrderCreated'",order);
         orders=startService("order",orderPort);
         await(20,()->value("orders","SELECT published_at FROM orders.event_outbox WHERE aggregate_id=? AND event_type='OrderCreated'",order)!=null);
         assertEquals(before,outbox("orders",order));
-        assertEquals("INVENTORY_RESERVED",status(order));
+        assertEquals("COMPLETED",status(order));
         assertEquals("2",value("inventory","SELECT reserved FROM inventory.stock WHERE product_id=?",sku));
         assertEquals("1",value("inventory","SELECT count(*) FROM inventory.event_outbox WHERE aggregate_id=?",order));
     }
@@ -218,7 +222,7 @@ class KafkaFlowIT {
             }
         }
         inventory=startService("inventory",inventoryPort);
-        await(30,()->"INVENTORY_RESERVED".equals(status(order)));
+        await(30,()->"COMPLETED".equals(status(order)));
         String original=outbox("orders",order);
         send("flowops.orders.v1",order,original);
         var duplicate=(ObjectNode)json.readTree(original);
@@ -226,10 +230,61 @@ class KafkaFlowIT {
         send("flowops.orders.v1",order,json.writeValueAsString(duplicate));
         await(20,()->"1".equals(value("inventory","SELECT COUNT(*) FROM inventory.processed_event WHERE event_id=?",replay)));
         for (String schema : List.of("orders","inventory")) {
-            assertEquals("3",value(schema,"SELECT COUNT(*) FROM "+schema+".event_outbox WHERE aggregate_id=?",order));
+            assertEquals(schema.equals("orders") ? "4" : "3",value(schema,"SELECT COUNT(*) FROM "+schema+".event_outbox WHERE aggregate_id=?",order));
         }
         assertEquals("2",value("inventory","SELECT reserved FROM inventory.stock WHERE product_id=?",sku));
-        assertEquals("INVENTORY_RESERVED",status(order));
+        assertEquals("COMPLETED",status(order));
+    }
+
+
+    @Test void paymentDeclineLeavesStockReservedAndOrderAwaitingCompensation() throws Exception {
+        String sku=product(3); UUID order=create(sku,1,1001);
+        await(30,()->"PAYMENT_FAILED_PENDING_COMPENSATION".equals(status(order)));
+        assertEquals("FAILED",value("payments","SELECT status FROM payments.payment WHERE order_id=?",order));
+        assertEquals("1",value("inventory","SELECT reserved FROM inventory.stock WHERE product_id=?",sku));
+        assertEquals("RESERVED",value("inventory","SELECT status FROM inventory.reservation WHERE order_id=?",order));
+        var request=json.readTree(observe("flowops.payment-requests.v1",order).value());
+        var outcome=json.readTree(observe("flowops.payments.v1",order).value());
+        assertEquals("PaymentFailed",outcome.get("eventType").asText());
+        assertEquals(request.get("eventId").asText(),outcome.at("/payload/causationId").asText());
+        assertEquals(order.toString(),outcome.get("correlationId").asText());
+        assertEquals(json.readTree(outbox("inventory",order)).get("eventId").asText(),request.at("/payload/causationId").asText());
+    }
+
+    @Test void paymentConsumerRestartAndDuplicateRequestsDoNotCreateAnotherAttempt() throws Exception {
+        String sku=product(4); UUID first=create(sku,1);
+        await(30,()->"COMPLETED".equals(status(first)));
+        String original=value("orders","SELECT event_json FROM orders.event_outbox WHERE aggregate_id=? AND event_type='PaymentRequested'",first);
+        stop(payment);
+        UUID queued=create(sku,1);
+        await(20,()->"INVENTORY_RESERVED".equals(status(queued)));
+        send("flowops.payment-requests.v1",first,original);
+        var duplicate=(ObjectNode)json.readTree(original); UUID duplicateId=UUID.randomUUID();
+        duplicate.put("eventId",duplicateId.toString());
+        send("flowops.payment-requests.v1",first,json.writeValueAsString(duplicate));
+        payment=startService("payment",paymentPort);
+        await(30,()->"COMPLETED".equals(status(queued)));
+        await(20,()->"1".equals(value("payments","SELECT count(*) FROM payments.processed_event WHERE event_id=?",duplicateId)));
+        assertEquals("1",value("payments","SELECT count(*) FROM payments.payment WHERE order_id=?",first));
+        assertEquals("1",value("payments","SELECT count(*) FROM payments.payment_attempt a JOIN payments.payment p ON p.id=a.payment_id WHERE p.order_id=?",first));
+        assertEquals("1",value("payments","SELECT count(*) FROM payments.event_outbox WHERE aggregate_id=?",first));
+        assertEquals("COMPLETED",status(first));
+    }
+
+    @Test void paymentRelayRetriesAfterRealKafkaSendAndDatabaseMarkFailure() throws Exception {
+        String sku=product(2);
+        sql("payments","ALTER TABLE payments.event_outbox ADD CONSTRAINT relay_failure_test CHECK (published_at IS NULL) NOT VALID");
+        UUID order;
+        try {
+            order=create(sku,1);
+            await(30,()->"COMPLETED".equals(status(order)));
+            assertEquals("1",value("payments","SELECT count(*) FROM payments.event_outbox WHERE aggregate_id=? AND published_at IS NULL",order));
+        } finally { sql("payments","ALTER TABLE payments.event_outbox DROP CONSTRAINT relay_failure_test"); }
+        await(20,()->value("payments","SELECT published_at FROM payments.event_outbox WHERE aggregate_id=?",order)!=null);
+        String original=value("payments","SELECT event_json FROM payments.event_outbox WHERE aggregate_id=?",order);
+        send("flowops.payments.v1",order,original);
+        assertEquals("1",value("payments","SELECT count(*) FROM payments.payment_attempt a JOIN payments.payment p ON p.id=a.payment_id WHERE p.order_id=?",order));
+        assertEquals("COMPLETED",status(order));
     }
 
     @FunctionalInterface interface Condition { boolean evaluate() throws Exception; }
