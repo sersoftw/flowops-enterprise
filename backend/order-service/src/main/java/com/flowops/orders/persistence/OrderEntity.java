@@ -15,7 +15,7 @@ class OrderEntity {
     @Column(nullable = false) UUID customerId;
     @Column(nullable = false, length = 3) String currency;
     @Enumerated(EnumType.STRING)
-    @Column(nullable = false, length = 24) Order.Status status;
+    @Column(nullable = false, length = 40) Order.Status status;
     @Column(nullable = false) Instant createdAt;
     @Column(nullable = false, precision = 19, scale = 2) BigDecimal total;
     @Column(nullable = false, unique = true, length = 128) String idempotencyKey;

@@ -179,3 +179,18 @@ Schema migrations are Flyway-managed and deliberately contain only a small `boot
 PostgreSQL initialization runs only on an empty volume. Changing `.env` passwords or role grants does not reinitialize existing data. For disposable development data only, use the documented `down -v` command and start again; it deletes all database and Kafka data. Kafka explicitly stores its logs in the mounted `/var/lib/kafka/data` directory. Ports 5432 and 9092 are loopback-only for host development; the controller port is not published.
 
 Read `AGENTS.md` and `docs/adr/` before asking Codex to implement any features.
+
+## Day 5: simulated payments
+
+New orders now follow OrderCreated -> InventoryReserved -> PaymentRequested ->
+PaymentSucceeded -> COMPLETED. A simulator v1 total above 1000.00 emits PaymentFailed
+and leaves the order PAYMENT_FAILED_PENDING_COMPENSATION with stock still reserved.
+No real provider, card data or Day 6 compensation is implemented. Inventory rejection
+remains INVENTORY_REJECTED and never requests payment. The existing INVENTORY_RESERVED
+state means payment is outstanding; it is not successful completion.
+
+See [ADR-0008](docs/adr/0008-simulated-payments-and-causal-publication.md) for contracts,
+transactional idempotency, causal publication, deployment prerequisites and limitations,
+and [Day 5 validation](docs/day5-validation.md) for reproducible checks. The three-service
+Kafka/PostgreSQL test suite requires `./mvnw -B -ntp -Dpostgres.tests=true clean verify`
+and Docker. Default Maven verification runs the fast suites and explicitly skips containers.
