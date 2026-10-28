@@ -1,6 +1,6 @@
 # FlowOps Enterprise
 
-**Day 3 — Inventory catalog and concurrent reservations (pending review).**
+**Day 4 — Versioned Kafka contracts and the first asynchronous inventory flow (pending review).**
 
 Java 21, Spring Boot 4.1.1, Maven multi-module, PostgreSQL 17, Apache Kafka 4.2.2, Docker Compose.
 
@@ -69,7 +69,8 @@ pom.xml                         aggregator/parent
 backend/order-service           REST entry point (later: saga coordinator)
 backend/inventory-service       Internal catalog, stock and atomic reservations
 backend/payment-service         Simulated payments (later)
-backend/shared-contracts        Kafka contract types (later)
+backend/shared-contracts        Versioned Kafka transport records and JSON schemas
+backend/integration-tests       PostgreSQL/Kafka tests of packaged service processes
 infrastructure/docker           Compose and Dockerfiles
 infrastructure/postgres         Development DB roles and schemas
 docs/adr                        Architecture decisions
@@ -144,7 +145,30 @@ own application owner first; schema names must match `[A-Za-z_][A-Za-z0-9_]{0,62
 Flyway and JDBC use the same configured schema. CI exercises both the default and
 `inventory_alt` with restricted PostgreSQL roles.
 
-**Not implemented yet:** inventory business HTTP API, payment processing, JWT, React UI, outbox, saga, DLQ.
+## Kafka flow (Day 4)
+
+New orders are persisted with an OrderCreated v1 outbox event and initially return
+PENDING. A relay publishes to flowops.orders.v1 with the order UUID as key. Inventory
+reserves stock and durably emits InventoryReserved or InventoryRejected on
+flowops.inventory.v1. Order status eventually becomes INVENTORY_RESERVED or
+INVENTORY_REJECTED. A missing product is rejected; the internal inventory catalog
+must be populated before creating a successful order.
+
+POST responses include X-Correlation-Id (the generated order UUID). Events and
+service logs preserve that correlation. See the [JSON contracts](backend/shared-contracts/src/main/resources/contracts/v1)
+and [ADR-0007](docs/adr/0007-kafka-outbox-and-inbox.md) for delivery, replay and ordering rules.
+Run root `./mvnw -B -ntp -Dpostgres.tests=true clean verify` with Docker for all
+PostgreSQL suites and the Kafka tests, including consumer/relay process restarts.
+Without Docker, omit the property: container tests are explicitly reported skipped.
+The [Day 4 evidence record](docs/day4-validation.md) distinguishes local and CI results.
+
+Messages are delivered at least once. Inventory remembers rejections, so replenishing
+stock does not reverse an already rejected order. Missing release is still a no-op:
+it does not prevent a later OrderCreated from reserving stock. There are no cancellation
+events or guarantees for out-of-order cancellation. Invalid messages currently block
+their partition for investigation instead of being silently discarded.
+
+**Not implemented yet:** inventory business HTTP API, payment processing, JWT, React UI, saga compensation, DLQ.
 
 ## Known assumptions and security boundaries
 

@@ -19,6 +19,7 @@
         <module>backend/order-service</module>
         <module>backend/inventory-service</module>
         <module>backend/payment-service</module>
+        <module>backend/integration-tests</module>
     </modules>
     <properties>
         <java.version>21</java.version>

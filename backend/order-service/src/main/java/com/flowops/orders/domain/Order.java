@@ -8,7 +8,7 @@ import java.util.UUID;
 
 public record Order(UUID id, UUID customerId, String currency, Status status,
                     Instant createdAt, List<Item> items) {
-    public enum Status { PENDING }
+    public enum Status { PENDING, INVENTORY_RESERVED, INVENTORY_REJECTED }
 
     public Order {
         if (id == null || customerId == null || status == null || createdAt == null) {
