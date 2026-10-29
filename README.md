@@ -194,3 +194,18 @@ transactional idempotency, causal publication, deployment prerequisites and limi
 and [Day 5 validation](docs/day5-validation.md) for reproducible checks. The three-service
 Kafka/PostgreSQL test suite requires `./mvnw -B -ntp -Dpostgres.tests=true clean verify`
 and Docker. Default Maven verification runs the fast suites and explicitly skips containers.
+
+## Day 6: saga compensation
+
+New failed payments move through RELEASING_INVENTORY to CANCELLED only after a valid
+InventoryReleased confirmation. Inventory rejection cancels without requesting payment.
+Successful payments still complete; delayed failures cannot trigger a new compensation.
+Release of an absent reservation now writes a permanent cancellation mark, preventing a
+later reservation for that same order. Repeated release never restores stock twice.
+
+After three confirmation windows (60 seconds each by default), unresolved compensation
+moves to MANUAL_REVIEW. History and error records remain in each service's own schema.
+No automatic resolution of ambiguous cases, DLT or Day 7 feature is added. See
+[ADR-0009](docs/adr/0009-orchestrated-compensation-and-cancellation.md) for state transitions,
+causal evidence, rollout requirements and in-flight event limits, and
+[Day 6 validation](docs/day6-validation.md) for reproducible checks and PR evidence.

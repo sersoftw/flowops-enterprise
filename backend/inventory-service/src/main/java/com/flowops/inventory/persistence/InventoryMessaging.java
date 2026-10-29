@@ -44,9 +44,12 @@ public class InventoryMessaging {
     }
 
     private void process(EventEnvelope<OrderCreated> event) {
-        var seen = jdbc.queryForList("SELECT aggregate_id FROM " + schema + "processed_event WHERE event_id=?", UUID.class, event.eventId());
+        store.lockOrder(event.aggregateId());
+        var seen = jdbc.queryForList("SELECT aggregate_id,event_json FROM " + schema + "processed_event WHERE event_id=?", event.eventId());
         if (!seen.isEmpty()) {
-            if (!seen.getFirst().equals(event.aggregateId())) throw new IllegalArgumentException("Event ID reused for another order");
+            var row=seen.getFirst();
+            if (!event.aggregateId().equals(row.get("aggregate_id")) || (row.get("event_json")!=null && !json.writeValueAsString(event).equals(row.get("event_json"))))
+                throw new IllegalArgumentException("Event ID reused with conflicting content");
             return;
         }
         String request = json.writeValueAsString(event.payload());
@@ -71,6 +74,8 @@ public class InventoryMessaging {
             rejection = InventoryRejected.Reason.INSUFFICIENT_STOCK;
         } catch (InventoryStore.ProductNotFound ex) {
             rejection = InventoryRejected.Reason.PRODUCT_NOT_FOUND;
+        } catch (InventoryStore.ReservationCancelled ex) {
+            rejection = InventoryRejected.Reason.RESERVATION_RELEASED;
         } catch (InventoryStore.Conflict ex) {
             rejection = InventoryRejected.Reason.RESERVATION_CONFLICT;
         }
@@ -86,6 +91,6 @@ public class InventoryMessaging {
     }
 
     private void markProcessed(EventEnvelope<?> event) {
-        jdbc.update("INSERT INTO " + schema + "processed_event(event_id,aggregate_id) VALUES (?,?)", event.eventId(), event.aggregateId());
+        jdbc.update("INSERT INTO " + schema + "processed_event(event_id,aggregate_id,event_json) VALUES (?,?,?)", event.eventId(), event.aggregateId(),json.writeValueAsString(event));
     }
 }

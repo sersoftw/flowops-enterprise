@@ -114,7 +114,7 @@ abstract class InventoryMessagingContract extends InventoryPersistenceContract {
         messaging.accept(order.toString(),raw);
         assertEquals(new Stock(sku,2,3),stock(sku));
     }
-    @Test void releasedReservationIsNotResurrectedButMissingReleaseIsNotACancellation() {
+    @Test void releasedAndMissingReservationsCannotBeResurrected() {
         var sku=product(5); var released=UUID.randomUUID();
         inventory.reserve(released,line(sku,2)); inventory.release(released);
         messaging.accept(released.toString(),event(released,UUID.randomUUID(),sku,2));
@@ -122,7 +122,7 @@ abstract class InventoryMessagingContract extends InventoryPersistenceContract {
         var missing=UUID.randomUUID();
         assertTrue(inventory.release(missing).isEmpty());
         messaging.accept(missing.toString(),event(missing,UUID.randomUUID(),sku,2));
-        assertEquals("InventoryReserved",result(missing)); assertEquals(new Stock(sku,3,2),stock(sku));
+        assertEquals("InventoryRejected",result(missing)); assertEquals(new Stock(sku,5,0),stock(sku));
     }
     @Test void invalidKeyVersionAndConflictingContentCannotMutateStock() {
         var sku=product(5); var order=UUID.randomUUID(); var raw=event(order,UUID.randomUUID(),sku,2);
@@ -142,5 +142,71 @@ abstract class InventoryMessagingContract extends InventoryPersistenceContract {
         messaging.accept(order.toString(),json.writeValueAsString(event));
         assertEquals(before,ids.stream().map(this::stock).toList());
         assertTrue(inventory.reservation(order).isEmpty()); assertEquals("InventoryRejected",result(order));
+    }
+
+    @Autowired com.flowops.inventory.persistence.InventoryReleaseMessaging releases;
+    String qualified(String table) { return "\""+schemaName+"\"."+table; }
+    EventEnvelope<InventoryReleaseRequested> releaseEvent(UUID order,UUID reservation) {
+        return new EventEnvelope<>(UUID.randomUUID(),"InventoryReleaseRequested",1,order,order,Instant.now(),new InventoryReleaseRequested(UUID.randomUUID(),reservation));
+    }
+    void release(EventEnvelope<InventoryReleaseRequested> e) { releases.accept(e.aggregateId().toString(),json.writeValueAsString(e)); }
+    UUID reservedEvent(UUID order) {return jdbc.queryForObject("SELECT event_id FROM "+qualified("event_outbox")+" WHERE aggregate_id=? AND event_type='InventoryReserved'",UUID.class,order);}
+    @Test void concurrentReleaseDeliveriesRestoreStockOnceAndCommitOneResult() throws Exception {
+        String sku=product(5); UUID order=UUID.randomUUID(); messaging.accept(order.toString(),event(order,UUID.randomUUID(),sku,3));
+        var request=releaseEvent(order,reservedEvent(order));
+        assertEquals(List.of(true,true),race(()->{release(request);return true;},()->{release(request);return true;}));
+        release(new EventEnvelope<>(UUID.randomUUID(),request.eventType(),1,order,order,Instant.now(),request.payload()));
+        assertEquals(new Stock(sku,5,0),stock(sku));
+        assertEquals(Reservation.Status.RELEASED,inventory.reservation(order).orElseThrow().status());
+        assertEquals(2,count("event_outbox",order));
+        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM "+qualified("inventory_release")+" WHERE order_id=?",Integer.class,order));
+        messaging.accept(order.toString(),event(order,UUID.randomUUID(),sku,3));
+        assertEquals(new Stock(sku,5,0),stock(sku));
+    }
+    @Test void earlyReleaseCreatesDurableTombstoneBeforeDelayedCreation() {
+        String sku=product(5); UUID order=UUID.randomUUID(); var request=releaseEvent(order,UUID.randomUUID());
+        release(request);
+        assertEquals("ABSENT_PREVENTED",jdbc.queryForObject("SELECT outcome FROM "+qualified("inventory_release")+" WHERE order_id=?",String.class,order));
+        messaging.accept(order.toString(),event(order,UUID.randomUUID(),sku,3));
+        assertEquals("InventoryRejected",result(order)); assertTrue(inventory.reservation(order).isEmpty());
+        assertThrows(com.flowops.inventory.application.InventoryStore.ReservationCancelled.class,()->inventory.reserve(order,line(sku,3)));
+        assertEquals(new Stock(sku,5,0),stock(sku));
+    }
+    @Test void firstReserveRacingMissingReleaseCannotEscapeTombstone() throws Exception {
+        for(int i=0;i<5;i++) {
+            String sku=product(5); UUID order=UUID.randomUUID();
+            var outcomes=race(()->{inventory.release(order);return true;},()->{
+                try {inventory.reserve(order,line(sku,3));} catch(com.flowops.inventory.application.InventoryStore.ReservationCancelled expected) { }
+                return true;
+            });
+            assertEquals(List.of(true,true),outcomes);
+            assertEquals(true,jdbc.queryForObject("SELECT cancelled FROM "+qualified("reservation_guard")+" WHERE order_id=?",Boolean.class,order));
+            assertEquals(new Stock(sku,5,0),stock(sku));
+            assertTrue(inventory.reservation(order).isEmpty() || inventory.reservation(order).orElseThrow().status()==Reservation.Status.RELEASED);
+        }
+    }
+    @Test void releaseResultFailureRollsBackStockTombstoneDecisionAndInbox() {
+        String sku=product(5); UUID order=UUID.randomUUID(); messaging.accept(order.toString(),event(order,UUID.randomUUID(),sku,3));
+        var request=releaseEvent(order,reservedEvent(order));
+        jdbc.execute("ALTER TABLE "+qualified("event_outbox")+" ADD CONSTRAINT no_release_test CHECK (event_type<>'InventoryReleased' OR aggregate_id<>'"+order+"')");
+        try {
+            assertThrows(RuntimeException.class,()->release(request));
+            assertEquals(new Stock(sku,2,3),stock(sku));
+            assertEquals(false,jdbc.queryForObject("SELECT cancelled FROM "+qualified("reservation_guard")+" WHERE order_id=?",Boolean.class,order));
+            assertEquals(0,jdbc.queryForObject("SELECT count(*) FROM "+qualified("inventory_release")+" WHERE order_id=?",Integer.class,order));
+            assertEquals(1,count("processed_event",order));
+            assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM "+qualified("compensation_error")+" WHERE order_id=?",Integer.class,order));
+        } finally {jdbc.execute("ALTER TABLE "+qualified("event_outbox")+" DROP CONSTRAINT no_release_test");}
+        release(request);assertEquals(new Stock(sku,5,0),stock(sku));
+    }
+    @Test void incorrectReservationOrCorrelationCannotReleaseStock() {
+        String sku=product(5); UUID order=UUID.randomUUID(); messaging.accept(order.toString(),event(order,UUID.randomUUID(),sku,3));
+        assertThrows(IllegalArgumentException.class,()->release(releaseEvent(order,UUID.randomUUID())));
+        var valid=releaseEvent(order,reservedEvent(order));
+        assertThrows(IllegalArgumentException.class,()->release(new EventEnvelope<>(valid.eventId(),valid.eventType(),1,order,UUID.randomUUID(),valid.occurredAt(),valid.payload())));
+        assertEquals(new Stock(sku,2,3),stock(sku));
+        release(valid);
+        assertThrows(IllegalArgumentException.class,()->release(releaseEvent(order,reservedEvent(order))));
+        assertEquals(new Stock(sku,5,0),stock(sku));
     }
 }

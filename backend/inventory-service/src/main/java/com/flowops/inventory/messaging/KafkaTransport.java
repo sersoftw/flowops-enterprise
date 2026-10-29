@@ -17,7 +17,10 @@ import org.springframework.util.backoff.FixedBackOff;
 @ConditionalOnProperty(name="flowops.messaging.enabled", havingValue="true", matchIfMissing=true)
 public class KafkaTransport {
     private final InventoryMessaging handler;
-    public KafkaTransport(InventoryMessaging handler) { this.handler = handler; }
+    private final com.flowops.inventory.persistence.InventoryReleaseMessaging releases;
+    public KafkaTransport(InventoryMessaging handler, com.flowops.inventory.persistence.InventoryReleaseMessaging releases) { this.handler = handler; this.releases = releases; }
+
+    @Bean NewTopic releaseTopic() { return TopicBuilder.name("flowops.inventory-release-requests.v1").partitions(3).replicas(1).build(); }
 
     @Bean NewTopic ordersTopic() { return TopicBuilder.name("flowops.orders.v1").partitions(3).replicas(1).build(); }
     @Bean NewTopic inventoryTopic() { return TopicBuilder.name("flowops.inventory.v1").partitions(3).replicas(1).build(); }
@@ -29,6 +32,9 @@ public class KafkaTransport {
         errors.setCommitRecovered(false);
         return errors;
     }
+
+    @KafkaListener(id="flowops-inventory-release-v1", topics="flowops.inventory-release-requests.v1", groupId="flowops-inventory-release-v1")
+    public void release(ConsumerRecord<String,String> record) { releases.accept(record.key(),record.value()); }
 
     @KafkaListener(id="flowops-inventory-v1", topics="flowops.orders.v1", groupId="flowops-inventory-v1")
     public void consume(ConsumerRecord<String,String> record) {

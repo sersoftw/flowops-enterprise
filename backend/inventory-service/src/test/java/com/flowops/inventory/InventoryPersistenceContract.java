@@ -90,15 +90,17 @@ abstract class InventoryPersistenceContract {
         assertEquals(new Stock(ids.get(1), 0, 4), stock(ids.get(1)));
     }
 
-    @Test void unknownProductRollsBackAndMissingReleaseIsNoOp() {
+    @Test void unknownProductRollsBackAndMissingReleasePreventsFutureReservation() {
         var id = product(3); var order = UUID.randomUUID();
         assertTrue(inventory.release(order).isEmpty());
         assertTrue(inventory.release(order).isEmpty());
-        assertThrows(InventoryStore.ProductNotFound.class, () -> inventory.reserve(order,
+        assertThrows(InventoryStore.ReservationCancelled.class, () -> inventory.reserve(order,line(id,1)));
+        var fresh=UUID.randomUUID();
+        assertThrows(InventoryStore.ProductNotFound.class, () -> inventory.reserve(fresh,
                 List.of(new ReservationLine(id, 2), new ReservationLine("zz-missing", 1))));
         assertEquals(new Stock(id, 3, 0), stock(id));
         assertTrue(inventory.reservation(order).isEmpty());
-        assertEquals(Reservation.Status.RESERVED, inventory.reserve(order, line(id, 1)).status());
+        assertEquals(Reservation.Status.RESERVED, inventory.reserve(fresh, line(id, 1)).status());
     }
 
     @Test void twoOrdersCannotReserveTheSameLastUnits() throws Exception {

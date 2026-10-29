@@ -2,6 +2,10 @@
 
 **Status:** Implemented for Day 5; pending review.
 
+Day 6 supersedes the missing-release limitation and adds compensation as described in
+[ADR-0009](0009-orchestrated-compensation-and-cancellation.md). The sections below
+record the original day's baseline.
+
 ## Scope and contracts
 
 Payment Service owns `payments` (the established deployment schema, despite Issue #5's

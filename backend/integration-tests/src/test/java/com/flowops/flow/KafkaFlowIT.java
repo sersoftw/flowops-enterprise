@@ -158,6 +158,7 @@ class KafkaFlowIT {
         assertEquals(envelope.get("eventId").asText(),result.at("/payload/causationId").asText());
         assertEquals(first.toString(),result.get("correlationId").asText());
         assertEquals("7",value("inventory","SELECT available FROM inventory.stock WHERE product_id=?",sku));
+        assertEquals("0",value("orders","SELECT count(*) FROM orders.event_outbox WHERE aggregate_id=? AND event_type='InventoryReleaseRequested'",first));
 
         stop(inventory);
         UUID queued=create(sku,2);
@@ -177,7 +178,7 @@ class KafkaFlowIT {
 
     @Test void rejectionRemainsStableAndDelayedContradictoryResultsDoNotRegressState() throws Exception {
         String sku=product(1); UUID order=create(sku,3);
-        await(30,()->"INVENTORY_REJECTED".equals(status(order)));
+        await(30,()->"CANCELLED".equals(status(order)));
         String raw=outbox("orders",order);
         var decision=json.readTree(observe("flowops.inventory.v1",order).value());
         assertEquals("INSUFFICIENT_STOCK",decision.at("/payload/reason").asText());
@@ -191,7 +192,9 @@ class KafkaFlowIT {
                 new InventoryReserved(UUID.fromString(json.readTree(raw).get("eventId").asText())));
         send("flowops.inventory.v1",order,json.writeValueAsString(result));
         await(20,()->"1".equals(value("orders","SELECT count(*) FROM orders.processed_event WHERE event_id=?",contradictory)));
-        assertEquals("INVENTORY_REJECTED",status(order));
+        assertEquals("CANCELLED",status(order));
+        assertEquals("0",value("payments","SELECT count(*) FROM payments.payment WHERE order_id=?",order));
+        assertEquals("0",value("orders","SELECT count(*) FROM orders.event_outbox WHERE aggregate_id=? AND event_type IN ('PaymentRequested','InventoryReleaseRequested')",order));
         assertEquals("11",value("inventory","SELECT available FROM inventory.stock WHERE product_id=?",sku));
         assertEquals("0",value("inventory","SELECT count(*) FROM inventory.reservation WHERE order_id=?",order));
     }
@@ -237,12 +240,14 @@ class KafkaFlowIT {
     }
 
 
-    @Test void paymentDeclineLeavesStockReservedAndOrderAwaitingCompensation() throws Exception {
+    @Test void paymentDeclineReleasesInventoryAndCancelsOnlyAfterConfirmation() throws Exception {
         String sku=product(3); UUID order=create(sku,1,1001);
-        await(30,()->"PAYMENT_FAILED_PENDING_COMPENSATION".equals(status(order)));
+        await(30,()->"CANCELLED".equals(status(order)));
         assertEquals("FAILED",value("payments","SELECT status FROM payments.payment WHERE order_id=?",order));
-        assertEquals("1",value("inventory","SELECT reserved FROM inventory.stock WHERE product_id=?",sku));
-        assertEquals("RESERVED",value("inventory","SELECT status FROM inventory.reservation WHERE order_id=?",order));
+        assertEquals("0",value("inventory","SELECT reserved FROM inventory.stock WHERE product_id=?",sku));
+        assertEquals("3",value("inventory","SELECT available FROM inventory.stock WHERE product_id=?",sku));
+        assertEquals("RELEASED",value("inventory","SELECT status FROM inventory.reservation WHERE order_id=?",order));
+        assertEquals("CONFIRMED",value("orders","SELECT status FROM orders.saga_compensation WHERE order_id=?",order));
         var request=json.readTree(observe("flowops.payment-requests.v1",order).value());
         var outcome=json.readTree(observe("flowops.payments.v1",order).value());
         assertEquals("PaymentFailed",outcome.get("eventType").asText());
@@ -285,6 +290,55 @@ class KafkaFlowIT {
         send("flowops.payments.v1",order,original);
         assertEquals("1",value("payments","SELECT count(*) FROM payments.payment_attempt a JOIN payments.payment p ON p.id=a.payment_id WHERE p.order_id=?",order));
         assertEquals("COMPLETED",status(order));
+    }
+
+
+    @Test void compensationSurvivesConsumerAndRelayRestartsAndDuplicateDelayedEvents() throws Exception {
+        stop(payment);
+        String sku=product(4); UUID order=create(sku,2,1001);
+        await(30,()->"INVENTORY_RESERVED".equals(status(order)));
+        stop(inventory);
+        payment=startService("payment",paymentPort);
+        await(30,()->"RELEASING_INVENTORY".equals(status(order)));
+        String request=value("orders","SELECT event_json FROM orders.event_outbox WHERE aggregate_id=? AND event_type='InventoryReleaseRequested'",order);
+        stop(orders);
+        sql("orders","UPDATE orders.saga_compensation SET next_retry_at=CURRENT_TIMESTAMP WHERE order_id=?",order);
+        orders=startService("order",orderPort);
+        await(20,()->"2".equals(value("orders","SELECT attempts FROM orders.saga_compensation WHERE order_id=?",order)));
+        assertEquals(request,value("orders","SELECT event_json FROM orders.event_outbox WHERE aggregate_id=? AND event_type='InventoryReleaseRequested'",order));
+        inventory=startService("inventory",inventoryPort);
+        await(30,()->"CANCELLED".equals(status(order)));
+        send("flowops.inventory-release-requests.v1",order,request);
+        var duplicate=(ObjectNode)json.readTree(request); UUID id=UUID.randomUUID(); duplicate.put("eventId",id.toString());
+        send("flowops.inventory-release-requests.v1",order,json.writeValueAsString(duplicate));
+        await(20,()->"1".equals(value("inventory","SELECT count(*) FROM inventory.processed_event WHERE event_id=?",id)));
+        var delayed=(ObjectNode)json.readTree(outbox("orders",order)); UUID delayedId=UUID.randomUUID(); delayed.put("eventId",delayedId.toString());
+        send("flowops.orders.v1",order,json.writeValueAsString(delayed));
+        await(20,()->"1".equals(value("inventory","SELECT count(*) FROM inventory.processed_event WHERE event_id=?",delayedId)));
+        stop(inventory);
+        sql("inventory","UPDATE inventory.event_outbox SET published_at=NULL WHERE aggregate_id=? AND event_type='InventoryReleased'",order);
+        inventory=startService("inventory",inventoryPort);
+        await(20,()->value("inventory","SELECT published_at FROM inventory.event_outbox WHERE aggregate_id=? AND event_type='InventoryReleased'",order)!=null);
+        assertEquals("4",value("inventory","SELECT available FROM inventory.stock WHERE product_id=?",sku));
+        assertEquals("0",value("inventory","SELECT reserved FROM inventory.stock WHERE product_id=?",sku));
+        assertEquals("CANCELLED",status(order));
+        assertEquals("1",value("inventory","SELECT count(*) FROM inventory.inventory_release WHERE order_id=?",order));
+        assertEquals("1",value("orders","SELECT count(*) FROM orders.saga_history WHERE order_id=? AND to_state='CANCELLED' AND from_state<>to_state",order));
+    }
+    @Test void releaseTransactionFailureRetainsStockUntilDurableResultCanBeWritten() throws Exception {
+        String sku=product(3); UUID order;
+        sql("inventory","ALTER TABLE inventory.event_outbox ADD CONSTRAINT release_failure_test CHECK (event_type<>'InventoryReleased') NOT VALID");
+        try {
+            order=create(sku,1,1001);
+            await(30,()->"RELEASING_INVENTORY".equals(status(order)));
+            await(20,()->"1".equals(value("inventory","SELECT count(*) FROM inventory.compensation_error WHERE order_id=?",order)));
+            assertEquals("1",value("inventory","SELECT reserved FROM inventory.stock WHERE product_id=?",sku));
+            assertEquals("0",value("inventory","SELECT count(*) FROM inventory.inventory_release WHERE order_id=?",order));
+            assertEquals("0",value("inventory","SELECT count(*) FROM inventory.event_outbox WHERE aggregate_id=? AND event_type='InventoryReleased'",order));
+        } finally {sql("inventory","ALTER TABLE inventory.event_outbox DROP CONSTRAINT release_failure_test");}
+        await(30,()->"CANCELLED".equals(status(order)));
+        assertEquals("3",value("inventory","SELECT available FROM inventory.stock WHERE product_id=?",sku));
+        assertEquals("0",value("inventory","SELECT reserved FROM inventory.stock WHERE product_id=?",sku));
     }
 
     @FunctionalInterface interface Condition { boolean evaluate() throws Exception; }

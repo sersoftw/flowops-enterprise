@@ -22,6 +22,8 @@ public class KafkaTransport {
     @Bean NewTopic paymentRequestsTopic() { return TopicBuilder.name("flowops.payment-requests.v1").partitions(3).replicas(1).build(); }
     @Bean NewTopic paymentsTopic() { return TopicBuilder.name("flowops.payments.v1").partitions(3).replicas(1).build(); }
 
+    @Bean NewTopic releaseTopic() { return TopicBuilder.name("flowops.inventory-release-requests.v1").partitions(3).replicas(1).build(); }
+
     @Bean NewTopic ordersTopic() { return TopicBuilder.name("flowops.orders.v1").partitions(3).replicas(1).build(); }
     @Bean NewTopic inventoryTopic() { return TopicBuilder.name("flowops.inventory.v1").partitions(3).replicas(1).build(); }
 
