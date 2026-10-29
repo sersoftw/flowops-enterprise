@@ -14,6 +14,8 @@ public interface InventoryStore {
     Optional<Reservation> reservation(UUID orderId);
     Optional<Reservation> release(UUID orderId);
 
+    final class ReservationCancelled extends RuntimeException { }
+
     final class Conflict extends RuntimeException {
         public Conflict() { super("Order already has a reservation with different items"); }
     }

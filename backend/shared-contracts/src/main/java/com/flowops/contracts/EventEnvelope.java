@@ -9,7 +9,7 @@ public record EventEnvelope<T>(UUID eventId, String eventType, int eventVersion,
     public EventEnvelope {
         Objects.requireNonNull(eventId); Objects.requireNonNull(aggregateId);
         Objects.requireNonNull(correlationId); Objects.requireNonNull(occurredAt); Objects.requireNonNull(payload);
-        if (eventVersion != 1 || !java.util.Set.of("OrderCreated", "InventoryReserved", "InventoryRejected", "PaymentRequested", "PaymentSucceeded", "PaymentFailed").contains(eventType)) {
+        if (eventVersion != 1 || !java.util.Set.of("OrderCreated", "InventoryReserved", "InventoryRejected", "PaymentRequested", "PaymentSucceeded", "PaymentFailed", "InventoryReleaseRequested", "InventoryReleased").contains(eventType)) {
             throw new IllegalArgumentException("Unsupported event type/version");
         }
     }

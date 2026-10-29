@@ -81,8 +81,7 @@ public class JdbcInventoryStore implements InventoryStore {
             return transaction.execute(tx -> reserveInTransaction(request));
         } catch (DuplicateKeyException ex) {
             // PostgreSQL aborts the losing transaction. Replay only after rollback, in a fresh transaction.
-            return transaction.execute(tx -> readReservation(request.orderId(), false)
-                    .map(existing -> replay(existing, request)).orElseThrow(() -> ex));
+            return transaction.execute(tx -> reserveInTransaction(request));
         }
     }
 
@@ -92,8 +91,10 @@ public class JdbcInventoryStore implements InventoryStore {
         if (!org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()) {
             throw new IllegalStateException("Reservation requires an active transaction");
         }
+        boolean cancelled = lockOrder(request.orderId());
         var existing = readReservation(request.orderId(), false);
         if (existing.isPresent()) return replay(existing.get(), request);
+        if (cancelled) throw new ReservationCancelled();
         var locked = request.lines().stream().map(line -> lockStock(line.productId())).toList();
         existing = readReservation(request.orderId(), false);
         if (existing.isPresent()) return replay(existing.get(), request);
@@ -128,17 +129,34 @@ public class JdbcInventoryStore implements InventoryStore {
         return Optional.of(new Reservation(orderId, statuses.getFirst(), lines));
     }
 
+    /** Stable row serializes reservation, release and missing-reservation cancellation. */
+    boolean lockOrder(UUID orderId) {
+        if (!org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive())
+            throw new IllegalStateException("Guard requires an active transaction");
+        var existing=jdbc.queryForList("SELECT cancelled FROM " + schema + ".reservation_guard WHERE order_id=? FOR UPDATE",Boolean.class,orderId);
+        if (!existing.isEmpty()) return existing.getFirst();
+        // Concurrent first inserts are arbitrated by the PK; callers retry after rollback.
+        jdbc.update("INSERT INTO " + schema + ".reservation_guard(order_id,cancelled) VALUES (?,FALSE)",orderId);
+        return false;
+    }
+
     @Override
     public Optional<Reservation> release(UUID orderId) {
-        return transaction.execute(tx -> {
-            var existing = readReservation(orderId, true);
-            if (existing.isEmpty() || existing.get().status() == Reservation.Status.RELEASED) return existing;
+        try { return transaction.execute(tx -> releaseInTransaction(orderId)); }
+        catch (DuplicateKeyException race) { return transaction.execute(tx -> releaseInTransaction(orderId)); }
+    }
+
+    Optional<Reservation> releaseInTransaction(UUID orderId) {
+        lockOrder(orderId);
+        var existing = readReservation(orderId, true);
+        if (existing.isPresent() && existing.get().status() != Reservation.Status.RELEASED) {
             var reservation = existing.get();
-            for (var line : reservation.lines()) {
-                saveStock(lockStock(line.productId()).release(line.quantity()));
-            }
-            jdbc.update("UPDATE " + schema + ".reservation SET status = 'RELEASED' WHERE order_id = ?", orderId);
-            return Optional.of(new Reservation(orderId, Reservation.Status.RELEASED, reservation.lines()));
-        });
+            var updated = reservation.lines().stream().map(line -> lockStock(line.productId()).release(line.quantity())).toList();
+            updated.forEach(this::saveStock);
+            jdbc.update("UPDATE " + schema + ".reservation SET status='RELEASED' WHERE order_id=?", orderId);
+            existing = Optional.of(new Reservation(orderId, Reservation.Status.RELEASED, reservation.lines()));
+        }
+        jdbc.update("UPDATE " + schema + ".reservation_guard SET cancelled=TRUE WHERE order_id=?", orderId);
+        return existing;
     }
 }

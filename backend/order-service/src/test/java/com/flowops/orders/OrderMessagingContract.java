@@ -26,7 +26,7 @@ abstract class OrderMessagingContract {
     @Autowired ObjectMapper json;
     @Autowired PlatformTransactionManager manager;
     @BeforeEach void clean() {
-        for (var table : List.of("processed_event","event_outbox","order_item","purchase_order")) jdbc.update("DELETE FROM orders." + table);
+        for (var table : List.of("saga_error","saga_compensation","saga_history","processed_event","event_outbox","order_item","purchase_order")) jdbc.update("DELETE FROM orders." + table);
     }
     Order create(String key) {
         return orders.create(key, UUID.fromString("00000000-0000-0000-0000-000000000001"), "EUR",
@@ -197,8 +197,101 @@ abstract class OrderMessagingContract {
             messaging.accept(order.id().toString(),paymentResult(order,cause,!success));
             messaging.accept(order.id().toString(),result(order,"InventoryReserved",UUID.randomUUID()));
             messaging.accept(order.id().toString(),result(order,"InventoryRejected",UUID.randomUUID()));
-            assertEquals(success ? Order.Status.COMPLETED : Order.Status.PAYMENT_FAILED_PENDING_COMPENSATION,orders.get(order.id()).status());
+            assertEquals(success ? Order.Status.COMPLETED : Order.Status.MANUAL_REVIEW,orders.get(order.id()).status());
             assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM orders.event_outbox WHERE aggregate_id=? AND event_type='PaymentRequested'",Integer.class,order.id()));
         }
+    }
+
+    UUID failPayment(Order order) {
+        messaging.accept(order.id().toString(),result(order,"InventoryReserved",UUID.randomUUID()));
+        UUID request=jdbc.queryForObject("SELECT event_id FROM orders.event_outbox WHERE aggregate_id=? AND event_type='PaymentRequested'",UUID.class,order.id());
+        messaging.accept(order.id().toString(),paymentResult(order,request,false));
+        return jdbc.queryForObject("SELECT event_id FROM orders.event_outbox WHERE aggregate_id=? AND event_type='InventoryReleaseRequested'",UUID.class,order.id());
+    }
+    String releaseResult(Order order,UUID request,InventoryReleased.Outcome outcome) {
+        var original=json.readTree(jdbc.queryForObject("SELECT event_json FROM orders.event_outbox WHERE event_id=?",String.class,request));
+        UUID reservation=UUID.fromString(original.at("/payload/reservationEventId").asText());
+        return json.writeValueAsString(new EventEnvelope<>(UUID.randomUUID(),"InventoryReleased",1,order.id(),order.id(),Instant.now(),new InventoryReleased(request,reservation,outcome)));
+    }
+    @Test void failedPaymentCancelsOnlyAfterMatchingReleaseAndKeepsHistory() {
+        var order=create("saga"); UUID request=failPayment(order);
+        assertEquals(Order.Status.RELEASING_INVENTORY,orders.get(order.id()).status());
+        String confirmed=releaseResult(order,request,InventoryReleased.Outcome.RELEASED);
+        String unrelated=confirmed.replace(request.toString(),UUID.randomUUID().toString());
+        assertThrows(IllegalArgumentException.class,()->messaging.accept(order.id().toString(),unrelated));
+        var wrongReservation=(tools.jackson.databind.node.ObjectNode)json.readTree(confirmed);
+        ((tools.jackson.databind.node.ObjectNode)wrongReservation.get("payload")).put("reservationEventId",UUID.randomUUID().toString());
+        assertThrows(IllegalArgumentException.class,()->messaging.accept(order.id().toString(),json.writeValueAsString(wrongReservation)));
+        assertEquals(Order.Status.RELEASING_INVENTORY,orders.get(order.id()).status());
+        messaging.accept(order.id().toString(),confirmed); messaging.accept(order.id().toString(),confirmed);
+        assertEquals(Order.Status.CANCELLED,orders.get(order.id()).status());
+        assertEquals("CONFIRMED",jdbc.queryForObject("SELECT status FROM orders.saga_compensation WHERE order_id=?",String.class,order.id()));
+        assertEquals(List.of("PENDING","INVENTORY_RESERVED","PAYMENT_FAILED_PENDING_COMPENSATION","RELEASING_INVENTORY","CANCELLED"),
+                jdbc.queryForList("SELECT to_state FROM orders.saga_history WHERE order_id=? ORDER BY id",String.class,order.id()));
+        messaging.retryCompensations(Instant.now().plusSeconds(10000));
+        assertEquals(1,jdbc.queryForObject("SELECT attempts FROM orders.saga_compensation WHERE order_id=?",Integer.class,order.id()));
+    }
+    @Test void boundedRetriesSurviveHandlerRestartAndLateReleaseRequiresManualReview() {
+        var order=create("timeout"); UUID request=failPayment(order);
+        String before=jdbc.queryForObject("SELECT event_json FROM orders.event_outbox WHERE event_id=?",String.class,request);
+        var restarted=new OrderMessaging(jdbc,json,manager,"orders",60);
+        Instant first=Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS).plusSeconds(120);
+        restarted.retryCompensations(first); restarted.retryCompensations(first);
+        assertEquals(2,jdbc.queryForObject("SELECT attempts FROM orders.saga_compensation",Integer.class));
+        restarted.retryCompensations(first.plusSeconds(60)); restarted.retryCompensations(first.plusSeconds(120));
+        assertEquals(Order.Status.MANUAL_REVIEW,orders.get(order.id()).status());
+        assertEquals(3,jdbc.queryForObject("SELECT attempts FROM orders.saga_compensation",Integer.class));
+        assertNotNull(jdbc.queryForObject("SELECT abandoned_at FROM orders.event_outbox WHERE event_id=?",Object.class,request));
+        assertEquals(before,jdbc.queryForObject("SELECT event_json FROM orders.event_outbox WHERE event_id=?",String.class,request));
+        messaging.accept(order.id().toString(),releaseResult(order,request,InventoryReleased.Outcome.RELEASED));
+        assertEquals(Order.Status.MANUAL_REVIEW,orders.get(order.id()).status());
+        assertTrue(jdbc.queryForObject("SELECT count(*) FROM orders.saga_error",Integer.class)>=3);
+    }
+    @Test void missingExpectedReservationDoesNotPretendCompensationWasSafe() {
+        var order=create("absent"); UUID request=failPayment(order);
+        messaging.accept(order.id().toString(),releaseResult(order,request,InventoryReleased.Outcome.ABSENT_PREVENTED));
+        assertEquals(Order.Status.MANUAL_REVIEW,orders.get(order.id()).status());
+    }
+    @Test void releaseOutboxFailureRollsBackFailureTransitionHistoryAndInbox() {
+        var order=create("release-rollback"); messaging.accept(order.id().toString(),result(order,"InventoryReserved",UUID.randomUUID()));
+        UUID cause=jdbc.queryForObject("SELECT event_id FROM orders.event_outbox WHERE event_type='PaymentRequested'",UUID.class);
+        String failure=paymentResult(order,cause,false);
+        jdbc.execute("ALTER TABLE orders.event_outbox ADD CONSTRAINT no_release_test CHECK (event_type<>'InventoryReleaseRequested')");
+        try {
+            assertThrows(RuntimeException.class,()->messaging.accept(order.id().toString(),failure));
+            assertEquals(Order.Status.INVENTORY_RESERVED,orders.get(order.id()).status());
+            assertEquals(2,jdbc.queryForObject("SELECT count(*) FROM orders.saga_history",Integer.class));
+            assertEquals(0,jdbc.queryForObject("SELECT count(*) FROM orders.saga_compensation",Integer.class));
+        } finally {jdbc.execute("ALTER TABLE orders.event_outbox DROP CONSTRAINT no_release_test");}
+        messaging.accept(order.id().toString(),failure);
+        assertEquals(Order.Status.RELEASING_INVENTORY,orders.get(order.id()).status());
+    }
+    @Test void approvedOrdersAndInventoryRejectionsNeverRequestCompensationOrAnotherPayment() {
+        var rejected=create("no-stock"); messaging.accept(rejected.id().toString(),result(rejected,"InventoryRejected",UUID.randomUUID()));
+        assertEquals(Order.Status.CANCELLED,orders.get(rejected.id()).status());
+        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM orders.event_outbox WHERE aggregate_id=?",Integer.class,rejected.id()));
+        var paid=create("paid"); messaging.accept(paid.id().toString(),result(paid,"InventoryReserved",UUID.randomUUID()));
+        UUID request=jdbc.queryForObject("SELECT event_id FROM orders.event_outbox WHERE aggregate_id=? AND event_type='PaymentRequested'",UUID.class,paid.id());
+        messaging.accept(paid.id().toString(),paymentResult(paid,request,true));
+        messaging.accept(paid.id().toString(),paymentResult(paid,request,false));
+        messaging.retryCompensations(Instant.now().plusSeconds(10000));
+        assertEquals(Order.Status.COMPLETED,orders.get(paid.id()).status());
+        assertEquals(0,jdbc.queryForObject("SELECT count(*) FROM orders.event_outbox WHERE event_type='InventoryReleaseRequested'",Integer.class));
+    }
+    @Test void concurrentContradictoryPaymentResultsNeverCompensateACompletedOrder() throws Exception {
+        var order=create("race-results"); messaging.accept(order.id().toString(),result(order,"InventoryReserved",UUID.randomUUID()));
+        UUID cause=jdbc.queryForObject("SELECT event_id FROM orders.event_outbox WHERE event_type='PaymentRequested'",UUID.class);
+        var gate=new java.util.concurrent.CountDownLatch(1);
+        try(var pool=java.util.concurrent.Executors.newFixedThreadPool(2)) {
+            var futures=new ArrayList<java.util.concurrent.Future<?>>();
+            for(boolean success:List.of(true,false)) {
+                String raw=paymentResult(order,cause,success);
+                futures.add(pool.submit(()->{gate.await();messaging.accept(order.id().toString(),raw);return null;}));
+            }
+            gate.countDown();for(var f:futures)f.get(10,java.util.concurrent.TimeUnit.SECONDS);
+        }
+        var state=orders.get(order.id()).status();
+        assertTrue(state==Order.Status.COMPLETED || state==Order.Status.MANUAL_REVIEW);
+        assertEquals(0,jdbc.queryForObject("SELECT count(*) FROM orders.event_outbox WHERE event_type='InventoryReleaseRequested' AND abandoned_at IS NULL",Integer.class));
     }
 }

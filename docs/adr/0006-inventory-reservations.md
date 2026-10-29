@@ -2,6 +2,10 @@
 
 **Status:** Implemented for Day 3; pending human review.
 
+Day 6 supersedes the missing-release limitation and adds compensation as described in
+[ADR-0009](0009-orchestrated-compensation-and-cancellation.md). The sections below
+record the original day's baseline.
+
 ## Boundary and internal interface
 
 Product, Stock, Reservation and ReservationLine are immutable framework-free domain

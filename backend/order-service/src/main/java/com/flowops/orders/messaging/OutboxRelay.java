@@ -39,15 +39,16 @@ public class OutboxRelay {
     public boolean publishNext() {
         return Boolean.TRUE.equals(transaction.execute(tx -> {
             var rows = jdbc.queryForList("SELECT e.event_id,e.aggregate_id,e.correlation_id,e.event_type,e.event_json FROM " + table
-                    + " e WHERE e.published_at IS NULL AND NOT EXISTS (SELECT 1 FROM " + table
-                    + " prior WHERE prior.aggregate_id=e.aggregate_id AND prior.published_at IS NULL"
+                    + " e WHERE e.published_at IS NULL AND e.abandoned_at IS NULL AND NOT EXISTS (SELECT 1 FROM " + table
+                    + " prior WHERE prior.aggregate_id=e.aggregate_id AND prior.published_at IS NULL AND prior.abandoned_at IS NULL"
                     + " AND prior.publication_sequence < e.publication_sequence)"
                     + " ORDER BY e.publication_sequence LIMIT 1 FOR UPDATE SKIP LOCKED");
             if (rows.isEmpty()) return false;
             var row = rows.getFirst();
             UUID id = (UUID) row.get("event_id");
             try {
-                kafka.send("PaymentRequested".equals(row.get("event_type")) ? "flowops.payment-requests.v1" : "flowops.orders.v1",
+                kafka.send("InventoryReleaseRequested".equals(row.get("event_type")) ? "flowops.inventory-release-requests.v1" :
+                        "PaymentRequested".equals(row.get("event_type")) ? "flowops.payment-requests.v1" : "flowops.orders.v1",
                         row.get("aggregate_id").toString(), (String) row.get("event_json")).get(10, TimeUnit.SECONDS);
             } catch (InterruptedException interrupted) {
                 Thread.currentThread().interrupt(); throw new IllegalStateException("Relay interrupted", interrupted);
