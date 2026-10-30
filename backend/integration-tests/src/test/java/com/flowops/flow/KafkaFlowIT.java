@@ -341,6 +341,34 @@ class KafkaFlowIT {
         assertEquals("0",value("inventory","SELECT reserved FROM inventory.stock WHERE product_id=?",sku));
     }
 
+
+    @Test void exhaustedCompensationRemainsManualAfterLateReleaseAndProcessRestart() throws Exception {
+        stop(payment);
+        String sku=product(3); UUID order=create(sku,1,1001);
+        await(30,()->"INVENTORY_RESERVED".equals(status(order)));
+        stop(inventory);
+        payment=startService("payment",paymentPort);
+        await(30,()->"RELEASING_INVENTORY".equals(status(order)));
+        // Test fixture advances persisted deadlines, not business state or the retry counter.
+        for(int attempt=2;attempt<=3;attempt++) {
+            sql("orders","UPDATE orders.saga_compensation SET next_retry_at=CURRENT_TIMESTAMP WHERE order_id=?",order);
+            String expected=Integer.toString(attempt);
+            await(20,()->expected.equals(value("orders","SELECT attempts FROM orders.saga_compensation WHERE order_id=?",order)));
+        }
+        sql("orders","UPDATE orders.saga_compensation SET next_retry_at=CURRENT_TIMESTAMP WHERE order_id=?",order);
+        await(20,()->"MANUAL_REVIEW".equals(status(order)));
+        assertEquals("1",value("orders","SELECT count(*) FROM orders.saga_error WHERE order_id=? AND error_code='COMPENSATION_TIMEOUT'",order));
+        inventory=startService("inventory",inventoryPort);
+        // Already-dispatched commands can still complete. Manual state must retain that ambiguity.
+        await(30,()->"RELEASED".equals(value("inventory","SELECT status FROM inventory.reservation WHERE order_id=?",order)));
+        await(20,()->"1".equals(value("orders","SELECT count(*) FROM orders.saga_error WHERE order_id=? AND error_code='LATE_OR_CONTRADICTORY_RESULT'",order)));
+        stop(orders); orders=startService("order",orderPort);
+        assertEquals("MANUAL_REVIEW",status(order));
+        assertEquals("3",value("inventory","SELECT available FROM inventory.stock WHERE product_id=?",sku));
+        assertEquals("0",value("inventory","SELECT reserved FROM inventory.stock WHERE product_id=?",sku));
+        assertEquals("3",value("orders","SELECT attempts FROM orders.saga_compensation WHERE order_id=?",order));
+    }
+
     @FunctionalInterface interface Condition { boolean evaluate() throws Exception; }
     static void await(int seconds,Condition condition) throws Exception {
         long deadline=System.nanoTime()+Duration.ofSeconds(seconds).toNanos(); Exception last=null;

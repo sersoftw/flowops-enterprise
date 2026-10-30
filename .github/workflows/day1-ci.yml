@@ -8,6 +8,8 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      COMPOSE_PROJECT_NAME: flowops-ci-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -29,6 +31,11 @@ jobs:
         run: |
           cp .env.example .env
           docker compose config --quiet
+      - name: Verify clean Compose installation
+        run: |
+          test -z "$(docker compose ps -aq)"
+          test -z "$(docker volume ls -q --filter label=com.docker.compose.project=$COMPOSE_PROJECT_NAME)"
+          echo "Clean project confirmed: no existing containers or data volumes"
       - name: Build and start service containers
         run: docker compose up --build -d --wait --wait-timeout 240
       - name: Smoke test health endpoints
@@ -37,6 +44,13 @@ jobs:
         run: bash scripts/verify-db-isolation.sh
       - name: Verify order API and persistence after restart
         run: bash scripts/verify-orders.sh
+      - name: Repeatable MVP demo and recovery
+        run: |
+          bash scripts/seed-demo-data.sh
+          bash scripts/seed-demo-data.sh
+          bash scripts/demo-scenarios.sh --output build/demo-first.json
+          bash scripts/seed-demo-data.sh
+          bash scripts/demo-scenarios.sh --restart --output build/demo-repeat-restart.json
       - name: Verify Kafka listeners and persistence
         run: bash scripts/verify-kafka.sh
       - name: Diagnostics on failure
@@ -51,6 +65,7 @@ jobs:
             backend/*/target/surefire-reports/
             backend/*/target/failsafe-reports/
             backend/integration-tests/target/*.log
+            build/demo-*.json
       - name: Clean up
         if: always()
         run: |

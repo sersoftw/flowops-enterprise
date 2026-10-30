@@ -40,4 +40,22 @@ class EventContractTest {
         assertThrows(IllegalArgumentException.class, () -> new OrderCreated(List.of(new OrderCreated.Item("sku",1),new OrderCreated.Item("sku",2))));
         assertThrows(NullPointerException.class, () -> new InventoryReserved(null));
     }
+
+    @Test void documentedEventExamplesMatchTheirPublishedSchemas() throws Exception {
+        var json=new com.fasterxml.jackson.databind.ObjectMapper();
+        var directory=java.nio.file.Path.of("..","..","docs","examples","events");
+        try(var files=java.nio.file.Files.list(directory)) {
+            var examples=files.filter(p->p.toString().endsWith(".json")).toList();
+            assertEquals(8,examples.size());
+            for(var example:examples) {
+                var event=json.readTree(java.nio.file.Files.readString(example));
+                String type=event.get("eventType").asText();
+                try(var input=getClass().getResourceAsStream("/contracts/v1/"+type+".schema.json")) {
+                    assertNotNull(input);
+                    var schema=JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V202012).getSchema(input);
+                    assertTrue(schema.validate(event).isEmpty(),example.toString());
+                }
+            }
+        }
+    }
 }

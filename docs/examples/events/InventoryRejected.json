@@ -1,0 +1,12 @@
+{
+  "eventId": "00000000-0000-4000-8000-000000000007",
+  "eventType": "InventoryRejected",
+  "eventVersion": 1,
+  "aggregateId": "10000000-0000-4000-8000-000000000007",
+  "correlationId": "10000000-0000-4000-8000-000000000007",
+  "occurredAt": "2026-10-30T12:00:00Z",
+  "payload": {
+    "causationId": "00000000-0000-4000-8000-000000000001",
+    "reason": "INSUFFICIENT_STOCK"
+  }
+}

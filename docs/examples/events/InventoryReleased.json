@@ -1,0 +1,13 @@
+{
+  "eventId": "00000000-0000-4000-8000-000000000006",
+  "eventType": "InventoryReleased",
+  "eventVersion": 1,
+  "aggregateId": "10000000-0000-4000-8000-000000000007",
+  "correlationId": "10000000-0000-4000-8000-000000000007",
+  "occurredAt": "2026-10-30T12:00:00Z",
+  "payload": {
+    "causationId": "00000000-0000-4000-8000-000000000005",
+    "reservationEventId": "00000000-0000-4000-8000-000000000002",
+    "outcome": "RELEASED"
+  }
+}

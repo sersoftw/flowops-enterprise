@@ -1,211 +1,219 @@
 # FlowOps Enterprise
 
-**Day 4 — Versioned Kafka contracts and the first asynchronous inventory flow (pending review).**
+A reproducible, event-driven Java MVP: create an order, reserve stock, simulate payment,
+and compensate rejected payments. **v0.1.0 is prepared for review, not published.**
+No real payments, card data, authentication or production infrastructure are included.
 
-Java 21, Spring Boot 4.1.1, Maven multi-module, PostgreSQL 17, Apache Kafka 4.2.2, Docker Compose.
+## Architecture
+
+```mermaid
+flowchart LR
+    Client -->|REST| Order[Order Service :8081]
+    Order -->|OrderCreated| Kafka[(Kafka)]
+    Kafka --> Inventory[Inventory Service :8082]
+    Inventory -->|InventoryReserved / InventoryRejected| Kafka
+    Order -->|PaymentRequested| Kafka
+    Kafka --> Payment[Payment Service :8083]
+    Payment -->|PaymentSucceeded / PaymentFailed| Kafka
+    Order -->|InventoryReleaseRequested| Kafka
+    Inventory -->|InventoryReleased| Kafka
+    Kafka --> Order
+    Order --- OrdersDB[(orders schema)]
+    Inventory --- InventoryDB[(inventory schema)]
+    Payment --- PaymentsDB[(payments schema)]
+```
+
+Three independent Spring Boot services own separate PostgreSQL roles, schemas and Flyway
+migrations. Order orchestrates the saga; Inventory owns products, stock and reservations;
+Payment simulates one durable attempt per order. Shared contracts contain transport DTOs
+and JSON schemas only. Kafka delivery is **at least once**: transactional outboxes, inboxes,
+logical uniqueness and row locks protect business effects. There is no exactly-once
+transaction spanning Kafka and PostgreSQL or total ordering across topics.
+
+| Order state | Meaning |
+| --- | --- |
+| PENDING | Persisted with OrderCreated, awaiting inventory |
+| INVENTORY_RESERVED | Stock reserved, payment outstanding |
+| COMPLETED | Valid PaymentSucceeded accepted |
+| RELEASING_INVENTORY | Payment rejected, compensation awaiting confirmation |
+| CANCELLED | Inventory rejected before payment, or valid release confirmed after payment failure |
+| MANUAL_REVIEW | Compensation timed out or contradictory evidence requires investigation |
+
+PAYMENT_FAILED_PENDING_COMPENSATION is an intermediate history entry during compensation;
+INVENTORY_REJECTED remains readable for historical orders. Terminal states never regress
+automatically. Missing releases persist cancellation tombstones: a later reservation for
+the same order is prevented. See [ADR-0009](docs/adr/0009-orchestrated-compensation-and-cancellation.md).
 
 ## Requirements
 
-- Docker Desktop with Compose 2.20+ (or equivalent Docker Engine + Compose plugin)
-- Java 21; the official Maven Wrapper downloads pinned Maven 3.9.11
-- Bash, curl and Python 3 for the smoke scripts
-- Git and a GitHub repository named `flowops-enterprise`
+- Docker Engine/Desktop with Docker Compose **2.20+**, running Linux containers.
+- Available loopback ports 5432, 9092, 8081, 8082 and 8083.
+- Python **3.10+** for the portable demo; Bash/curl for infrastructure smoke scripts.
+- Java **21** for local Maven/tests. The Maven Wrapper downloads pinned Maven **3.9.11**.
+  Java/Maven need not be installed on the host for the Compose-only demo.
+- Internet access for initial container images and Maven dependencies.
 
-## Quick start
+Versions: Spring Boot 4.1.1, PostgreSQL 17.6, Apache Kafka 4.2.2. Allow several minutes for
+the first build. Run commands from the repository root. On Windows use PowerShell's
+`Copy-Item` and `python`; Bash scripts can run in Git Bash/WSL with Docker access.
+
+## Start from a clean checkout
 
 ```bash
-cp .env.example .env
-# Review .env: development-only passwords; never reuse in production.
-./mvnw -B clean verify
+git clone https://github.com/sersoftw/flowops-enterprise.git
+cd flowops-enterprise
+cp .env.example .env                 # PowerShell: Copy-Item .env.example .env
+# Review the example development credentials. Do not overwrite an existing .env.
 docker compose config --quiet
-docker compose up -d --build --wait --wait-timeout 240
-docker compose ps
-bash scripts/health-check.sh
-bash scripts/verify-db-isolation.sh
-# Linux, or Docker Desktop with host networking enabled:
-bash scripts/verify-kafka.sh
+docker compose up --build -d --wait --wait-timeout 240
+python3 scripts/demo.py seed
+python3 scripts/demo.py scenarios --output build/demo-first.json
 ```
 
-Expected health responses:
+The scenarios wait for all three health endpoints; Compose's wait also checks PostgreSQL
+and Kafka health. No manual topic creation or database migration command is required.
+`docker compose ps` shows services; `docker compose logs -f` shows logs. Health endpoints:
+`http://localhost:8081/actuator/health`, `:8082/actuator/health`, `:8083/actuator/health`.
+The internal Kafka listener is `kafka:29092`; host clients use `localhost:9092`.
 
-- order: http://localhost:8081/actuator/health
-- inventory: http://localhost:8082/actuator/health
-- payment: http://localhost:8083/actuator/health
+## Demonstration and repeatability
 
-Expected JSON contains `"status":"UP"` on all three URLs.
-
-`docker compose logs -f` to inspect logs. Run all commands from the repository root.
-On Windows PowerShell, use `Copy-Item .env.example .env` and `.\mvnw.cmd -B clean verify`;
-run the smoke scripts in Git Bash or WSL with access to Docker and Python 3.
-Root `compose.yml` includes the infrastructure definition without duplicating it.
-
-Clean up:
+Equivalent Bash entrypoints:
 
 ```bash
-docker compose down
-# Only if you want to delete local data:
-docker compose down -v
+bash scripts/seed-demo-data.sh
+bash scripts/demo-scenarios.sh --output build/demo-first.json
+# Repeating seed never replenishes or overwrites existing balances.
+bash scripts/seed-demo-data.sh
+bash scripts/demo-scenarios.sh --restart --output build/demo-repeat-restart.json
 ```
 
-## Local development
+`--restart` restarts all three microservices, waits for health, replays the same requests
+and compares order IDs, states, history, stock, payments and outbox event types.
+PostgreSQL and Kafka volumes are preserved. This is a local demonstration tool, not a
+production migration or an application API. It authenticates separately as each schema's
+restricted owner for seed/evidence queries; services themselves never read another schema.
+Default Compose schemas and ports are required. No external Python packages are needed.
 
-Start PostgreSQL and Kafka only:
+| Scenario | Product suffix | Initial available/reserved | Request | Final state | Final available/reserved |
+| --- | --- | --- | --- | --- | --- |
+| Approved | approved | 10 / 0 | 2 x EUR 12.50 | COMPLETED | 8 / 2 |
+| Insufficient | insufficient | 1 / 0 | 2 x EUR 12.50 | CANCELLED, no payment | 1 / 0 |
+| Declined | declined | 5 / 0 | 1 x EUR 1001.00 | CANCELLED, released | 5 / 0 |
 
-```bash
-docker compose up -d postgres kafka
-./mvnw -B clean verify
-# Set DB_PASSWORD to ORDER_DB_PASSWORD from your local .env first.
-./mvnw -pl backend/order-service spring-boot:run
-```
+Products and idempotency keys use `flowops-demo-v1-<suffix>`. Customer UUID is fictional.
+Simulator v1 approves totals <= 1000.00 and rejects larger totals in every supported
+currency. Approved stock stays reserved; fulfillment/consumption is not implemented.
+Each JSON report records actual before/after stock, POST/replay status, order IDs, history,
+payment and reservation outcomes. On repeat, approved stock starts and ends at 8 / 2.
+PENDING and INVENTORY_RESERVED are checked in persisted history, avoiding timing-sensitive
+HTTP polling for transient states. Unexpected MANUAL_REVIEW fails the healthy demo.
 
-Local development uses `DB_HOST=localhost`, `DB_PORT=5432`, `KAFKA_BOOTSTRAP_SERVERS=localhost:9092`, and module-specific DB usernames/passwords. Maven does not load `.env`: export `DB_PASSWORD` for the chosen service (and `DB_USERNAME` if overriding defaults). Start the other two modules in separate terminals with their own passwords. The containerized path loads `.env` automatically and is the recommended Day 1 smoke test.
+Do not use these reserved demo product IDs for other orders or manually alter their stock.
+The script fails on incompatible state instead of silently repairing it. Stable keys and
+DB uniqueness make repeat/concurrent submissions safe; demo reports are not snapshots of
+unrelated concurrent user activity. Use different output paths for concurrent runs.
 
-Maven smoke tests start each application on a random HTTP port with H2 in PostgreSQL mode and execute the real Flyway V1 migration. They do not prove PostgreSQL permissions or Kafka connectivity. Compose smoke scripts authenticate as each application role, require foreign-schema permission errors, exercise both Kafka listeners, and verify a test message survives broker container recreation. The Kafka script creates and deletes only its own temporary test topic.
+## API and event examples
 
-## Maven layout
-
-```text
-pom.xml                         aggregator/parent
-backend/order-service           REST entry point (later: saga coordinator)
-backend/inventory-service       Internal catalog, stock and atomic reservations
-backend/payment-service         Simulated payments (later)
-backend/shared-contracts        Versioned Kafka transport records and JSON schemas
-backend/integration-tests       PostgreSQL/Kafka tests of packaged service processes
-infrastructure/docker           Compose and Dockerfiles
-infrastructure/postgres         Development DB roles and schemas
-docs/adr                        Architecture decisions
-scripts                         Smoke checks
-.github/workflows               Build validation
-```
-
-## Day 1 acceptance criteria
-
-- [ ] `./mvnw -B clean verify` succeeds with Java 21.
-- [ ] `docker compose ... config --quiet` succeeds.
-- [ ] PostgreSQL creates exactly three application schemas and three restricted roles.
-- [ ] Kafka starts and advertises both internal (`kafka:29092`) and host (`localhost:9092`) listeners.
-- [ ] `docker compose ... up -d --build` builds and starts all three backend apps.
-- [ ] `bash scripts/health-check.sh` prints **3/3 healthy**.
-- [ ] A build/validation run is visible in GitHub Actions after pushing.
-
-See [the validation record](docs/day1-validation.md) for actual results and pending gates.
-
-## Order API (Day 2)
-
-`POST /api/orders` requires `Idempotency-Key` and creates a PENDING order (201).
-The same key/content returns the persisted order (200); different content returns 409.
-`GET /api/orders/{id}` retrieves an order; `GET /api/orders` supports `customerId`,
-`status`, zero-based `page` and `size` (1–100). Invalid requests return problem JSON (400).
-
-The [OpenAPI contract](backend/order-service/src/main/resources/static/openapi.yaml) is also
-served at `http://localhost:8081/openapi.yaml`. See [HTTP examples](docs/orders.http) and
-[ADR-0005](docs/adr/0005-order-api-and-idempotency.md) for bounds and replay semantics.
+Only Order exposes a business REST API; Inventory/Payment expose health endpoints.
+`POST /api/orders` requires `Idempotency-Key`: 201 for creation, 200 for equivalent replay,
+409 for changed content, 400 for invalid input. Totals are calculated server-side using
+BigDecimal from caller-provided item prices; this is not a trusted price catalog.
 
 ```bash
 curl -i http://localhost:8081/api/orders \
-  -H 'Content-Type: application/json' -H 'Idempotency-Key: example-order-001' \
-  -d '{"customerId":"f90c8ab2-5acf-4b35-8ec3-917167624075","currency":"EUR","items":[{"productId":"sku-1","quantity":2,"unitPrice":12.50}]}'
-curl 'http://localhost:8081/api/orders?status=PENDING&page=0&size=20'
-./mvnw -B -ntp clean verify                         # fast tests; PostgreSQL tests reported skipped
-./mvnw -B -ntp -Dpostgres.tests=true clean verify    # requires Docker; mandatory in CI
-bash scripts/verify-orders.sh                      # Compose HTTP checks, including restart and replay
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: flowops-demo-v1-approved' \
+  -d '{"customerId":"00000000-0000-4000-8000-000000000007","currency":"EUR","items":[{"productId":"flowops-demo-v1-approved","quantity":2,"unitPrice":12.50}]}'
+curl 'http://localhost:8081/api/orders?customerId=00000000-0000-4000-8000-000000000007&size=20'
+# GET /api/orders/{id} retrieves the current state; X-Correlation-Id is the order UUID.
 ```
 
-Prices are caller-supplied in this development API; totals are calculated server-side using
-BigDecimal. No catalog authority or payment processing is implied. See the
-[Day 2 validation record](docs/day2-validation.md) for actual results.
+[REST examples](docs/demo.http) reuse the exact demo keys/content.
+[OpenAPI](backend/order-service/src/main/resources/static/openapi.yaml) is served at
+`http://localhost:8081/openapi.yaml`. [Kafka examples](docs/examples/events/README.md)
+show the eight v1 envelopes, topics and causal references. They are documentation fixtures;
+do not publish alternative/contradictory examples into the demo topics.
 
-## Inventory service (Day 3)
+## Tests and CI
 
-The internal Java `InventoryService` supports product creation/lookup, stock lookup,
-replenishment, `reserve(orderId, items)` and `release(orderId)`. There are no inventory
-business HTTP endpoints yet. The health endpoint remains on port 8082.
-
-Reservations atomically move available units to reserved units. A repeated order ID
-with the same products/quantities returns its existing reservation; changed content
-raises a conflict. Release returns stock once. Replaying a released reservation
-returns RELEASED without reserving again. Missing release is a no-op, not a persistent
-cancellation. Products are locked in a stable order; insufficient stock rolls back
-all lines. See [ADR-0006](docs/adr/0006-inventory-reservations.md) for limits and concurrency.
-
-```java
-inventory.createProduct("sku-1", "Example product", 10);
-inventory.replenish("sku-1", 5);
-inventory.reserve(orderId, List.of(new ReservationLine("sku-1", 3)));
-inventory.stock("sku-1"); // available=12, reserved=3
-inventory.release(orderId); // available=15, reserved=0
+```bash
+./mvnw -B -ntp clean verify                         # fast suites; container tests explicitly skipped
+./mvnw -B -ntp -Dpostgres.tests=true clean verify    # all PostgreSQL/Kafka Testcontainers tests
+# Windows Maven: .\mvnw.cmd -B -ntp clean verify
+bash scripts/health-check.sh
+bash scripts/verify-db-isolation.sh
+bash scripts/verify-orders.sh
+bash scripts/verify-kafka.sh
 ```
 
-Run `./mvnw -B -ntp -Dpostgres.tests=true clean verify` with Docker for the complete
-suite, including PostgreSQL concurrency tests. Without that property, PostgreSQL
-tests are explicitly skipped. See [Day 3 validation](docs/day3-validation.md).
+The Kafka infrastructure script checks both listeners and broker persistence using host
+networking. It runs on Linux CI; Docker Desktop requires host networking enabled. It owns
+and removes only its temporary probe topic. Testcontainers runs isolated databases/brokers
+and packaged application JVMs; run root `verify` to build the required JARs first.
 
-Inventory supports `DB_SCHEMA` (default `inventory`). Provision that schema with its
-own application owner first; schema names must match `[A-Za-z_][A-Za-z0-9_]{0,62}`.
-Flyway and JDBC use the same configured schema. CI exercises both the default and
-`inventory_alt` with restricted PostgreSQL roles.
+CI uses a unique Compose project per run on a fresh runner (empty volumes), runs Maven with
+containers, seeds twice, runs the demo, seeds again and reruns with service restarts. Reports
+and `build/demo-*.json` are saved in `backend-test-reports`. The Kafka suite also covers
+MANUAL_REVIEW after exhausted compensation, late release and process restart; test-only
+SQL advances persisted deadlines instead of waiting three minutes. It never changes the
+business state or counter directly. See [Day 7 evidence](docs/day7-validation.md) and the PR
+for exact tested commits, execution results and logs; prior-day reports are historical.
 
-## Kafka flow (Day 4)
+## Local Java development
 
-New orders are persisted with an OrderCreated v1 outbox event and initially return
-PENDING. A relay publishes to flowops.orders.v1 with the order UUID as key. Inventory
-reserves stock and durably emits InventoryReserved or InventoryRejected on
-flowops.inventory.v1. Order status eventually becomes INVENTORY_RESERVED or
-INVENTORY_REJECTED. A missing product is rejected; the internal inventory catalog
-must be populated before creating a successful order.
+Start infrastructure with `docker compose up -d postgres kafka`. Export DB_PASSWORD for
+the chosen service from the matching local .env value, then run
+`./mvnw -pl backend/order-service -am install -DskipTests` and
+`./mvnw -pl backend/order-service spring-boot:run`. Repeat for other modules with their own
+credentials/ports. Maven does not load .env. Defaults are localhost PostgreSQL/Kafka and
+schemas orders/inventory/payments. DB_SCHEMA overrides must be provisioned with their own
+owner; the demo tooling intentionally targets the default Compose schemas.
 
-POST responses include X-Correlation-Id (the generated order UUID). Events and
-service logs preserve that correlation. See the [JSON contracts](backend/shared-contracts/src/main/resources/contracts/v1)
-and [ADR-0007](docs/adr/0007-kafka-outbox-and-inbox.md) for delivery, replay and ordering rules.
-Run root `./mvnw -B -ntp -Dpostgres.tests=true clean verify` with Docker for all
-PostgreSQL suites and the Kafka tests, including consumer/relay process restarts.
-Without Docker, omit the property: container tests are explicitly reported skipped.
-The [Day 4 evidence record](docs/day4-validation.md) distinguishes local and CI results.
+## Troubleshooting and operational limits
 
-Messages are delivered at least once. Inventory remembers rejections, so replenishing
-stock does not reverse an already rejected order. Missing release is still a no-op:
-it does not prevent a later OrderCreated from reserving stock. There are no cancellation
-events or guarantees for out-of-order cancellation. Invalid messages currently block
-their partition for investigation instead of being silently discarded.
+| Symptom | Check / action |
+| --- | --- |
+| Port already allocated | Stop the conflicting local stack; do not launch two projects on these same host ports. |
+| Connection refused after startup | Wait for health and inspect `docker compose logs --tail=100`; first builds can take minutes. |
+| PostgreSQL password mismatch | Initialization only runs on empty volumes. Changing .env does not change existing roles; restore matching credentials. |
+| PENDING or INVENTORY_RESERVED persists | Inspect service logs, Kafka consumer errors and each owner's pending outbox. Verify all three services are running. |
+| MANUAL_REVIEW | Follow the reconciliation procedure below. Never mark CANCELLED simply to unblock a demo. |
+| Seed/scenario mismatch | Reserved fixture IDs were changed or a prior run is incomplete; inspect evidence, do not reset balances. |
+| Flyway checksum mismatch | Do not repair blindly. Merged migrations are immutable; inspect the checkout/database version and rollout history. |
+| Testcontainers cannot start | Confirm Docker is running and accessible from the shell. Skipped local tests are not container-test evidence. |
 
-**Not implemented yet:** inventory business HTTP API, payment processing, JWT, React UI, saga compensation, DLQ.
+MANUAL_REVIEW can mean timeout, missing expected reservation or contradictory payment
+results. Inspect Order's saga_history/saga_error/saga_compensation and causal outbox; inspect
+Inventory's release decision/compensation_error/reservation and Payment's durable result
+using separate authorized owner sessions. Correlate eventId, aggregateId, correlationId and
+causationId. Determine whether stock was released and whether payment succeeded before any
+explicit recovery. There is no automated manual-resolution endpoint. Already-sent commands
+can complete after escalation; late confirmations do not automatically resolve the order.
 
-## Known assumptions and security boundaries
+Malformed versions, unrelated results and other poison messages retry and can block a Kafka
+partition. Preserve the original record, logs and offsets; correct the cause before recovery.
+There is no DLT or safe generic offset-skip procedure in v0.1.0. Do not inject arbitrary event
+examples into live topics. Inbox/outbox/tombstone retention is indefinite. Do not delete their
+rows independently to reset a demo. Old failed-payment orders are not automatically backfilled;
+historical missing releases before V6 cannot be reconstructed. Stop old writers/relays during
+migration because they bypass newer guards.
 
-This is development infrastructure, **not production configuration**. No TLS, no production IAM/secrets, and plaintext Kafka in a local Docker network. Only order/inventory/payment ports bind to loopback, and PostgreSQL/Kafka host ports are loopback-bound. Health endpoints are accessible locally. Docker volumes keep database and broker data across container restarts. Each application DB user owns only its schema.
+Local credentials are examples, Kafka is plaintext and producers are trusted. No TLS, JWT,
+production IAM, UI, real payment provider or money movement is included. Loopback port
+binding is not an authentication boundary for other processes on the same machine.
 
-Schema migrations are Flyway-managed and deliberately contain only a small `bootstrap_marker` table on Day 1. Business schemas begin Day 2.
+## Stop and release preparation
 
-PostgreSQL initialization runs only on an empty volume. Changing `.env` passwords or role grants does not reinitialize existing data. For disposable development data only, use the documented `down -v` command and start again; it deletes all database and Kafka data. Kafka explicitly stores its logs in the mounted `/var/lib/kafka/data` directory. Ports 5432 and 9092 are loopback-only for host development; the controller port is not published.
+`docker compose down` stops containers while retaining data. **`docker compose down -v`
+deletes the project's PostgreSQL and Kafka data**; use only for an explicitly disposable
+demo installation. Scripts never delete volumes or reset business data.
 
-Read `AGENTS.md` and `docs/adr/` before asking Codex to implement any features.
+[v0.1.0 release notes and approval checklist](docs/releases/v0.1.0.md) are prepared in Git.
+No tag, GitHub release or published artifact is created by this PR or workflow. Maven stays
+at 0.1.0-SNAPSHOT until the reviewed release procedure is authorized. Do not begin Issue #8
+until Day 7 has been reviewed and integrated.
 
-## Day 5: simulated payments
-
-New orders now follow OrderCreated -> InventoryReserved -> PaymentRequested ->
-PaymentSucceeded -> COMPLETED. A simulator v1 total above 1000.00 emits PaymentFailed
-and leaves the order PAYMENT_FAILED_PENDING_COMPENSATION with stock still reserved.
-No real provider, card data or Day 6 compensation is implemented. Inventory rejection
-remains INVENTORY_REJECTED and never requests payment. The existing INVENTORY_RESERVED
-state means payment is outstanding; it is not successful completion.
-
-See [ADR-0008](docs/adr/0008-simulated-payments-and-causal-publication.md) for contracts,
-transactional idempotency, causal publication, deployment prerequisites and limitations,
-and [Day 5 validation](docs/day5-validation.md) for reproducible checks. The three-service
-Kafka/PostgreSQL test suite requires `./mvnw -B -ntp -Dpostgres.tests=true clean verify`
-and Docker. Default Maven verification runs the fast suites and explicitly skips containers.
-
-## Day 6: saga compensation
-
-New failed payments move through RELEASING_INVENTORY to CANCELLED only after a valid
-InventoryReleased confirmation. Inventory rejection cancels without requesting payment.
-Successful payments still complete; delayed failures cannot trigger a new compensation.
-Release of an absent reservation now writes a permanent cancellation mark, preventing a
-later reservation for that same order. Repeated release never restores stock twice.
-
-After three confirmation windows (60 seconds each by default), unresolved compensation
-moves to MANUAL_REVIEW. History and error records remain in each service's own schema.
-No automatic resolution of ambiguous cases, DLT or Day 7 feature is added. See
-[ADR-0009](docs/adr/0009-orchestrated-compensation-and-cancellation.md) for state transitions,
-causal evidence, rollout requirements and in-flight event limits, and
-[Day 6 validation](docs/day6-validation.md) for reproducible checks and PR evidence.
+Repository layout: `backend/{order-service,inventory-service,payment-service,shared-contracts,integration-tests}`;
+`infrastructure/{docker,postgres}`; `scripts/`; `docs/adr/`; `.github/workflows/`.
