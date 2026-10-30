@@ -1,0 +1,26 @@
+### First run: python3 scripts/demo.py seed. These requests reuse the script's stable identities.
+@base = http://localhost:8081
+
+### Approved order: COMPLETED, available=8, reserved=2
+POST {{base}}/api/orders
+Content-Type: application/json
+Idempotency-Key: flowops-demo-v1-approved
+
+{"customerId":"00000000-0000-4000-8000-000000000007","currency":"EUR","items":[{"productId":"flowops-demo-v1-approved","quantity":2,"unitPrice":12.50}]}
+
+### Insufficient stock: CANCELLED without payment
+POST {{base}}/api/orders
+Content-Type: application/json
+Idempotency-Key: flowops-demo-v1-insufficient
+
+{"customerId":"00000000-0000-4000-8000-000000000007","currency":"EUR","items":[{"productId":"flowops-demo-v1-insufficient","quantity":2,"unitPrice":12.50}]}
+
+### Simulated decline: RELEASING_INVENTORY then CANCELLED, available=5, reserved=0
+POST {{base}}/api/orders
+Content-Type: application/json
+Idempotency-Key: flowops-demo-v1-declined
+
+{"customerId":"00000000-0000-4000-8000-000000000007","currency":"EUR","items":[{"productId":"flowops-demo-v1-declined","quantity":1,"unitPrice":1001.00}]}
+
+### List the fictitious customer's durable results
+GET {{base}}/api/orders?customerId=00000000-0000-4000-8000-000000000007&size=20

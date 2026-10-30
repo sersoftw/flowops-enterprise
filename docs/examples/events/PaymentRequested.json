@@ -1,0 +1,13 @@
+{
+  "eventId": "00000000-0000-4000-8000-000000000003",
+  "eventType": "PaymentRequested",
+  "eventVersion": 1,
+  "aggregateId": "10000000-0000-4000-8000-000000000007",
+  "correlationId": "10000000-0000-4000-8000-000000000007",
+  "occurredAt": "2026-10-30T12:00:00Z",
+  "payload": {
+    "causationId": "00000000-0000-4000-8000-000000000002",
+    "amount": 1001.0,
+    "currency": "EUR"
+  }
+}
