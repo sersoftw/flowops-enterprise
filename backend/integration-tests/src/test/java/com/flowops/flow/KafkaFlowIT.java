@@ -349,6 +349,7 @@ class KafkaFlowIT {
         stop(inventory);
         payment=startService("payment",paymentPort);
         await(30,()->"RELEASING_INVENTORY".equals(status(order)));
+        await(20,()->value("orders","SELECT published_at FROM orders.event_outbox WHERE aggregate_id=? AND event_type='InventoryReleaseRequested'",order)!=null);
         // Test fixture advances persisted deadlines, not business state or the retry counter.
         for(int attempt=2;attempt<=3;attempt++) {
             sql("orders","UPDATE orders.saga_compensation SET next_retry_at=CURRENT_TIMESTAMP WHERE order_id=?",order);
